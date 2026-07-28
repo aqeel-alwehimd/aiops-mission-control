@@ -1,0 +1,22 @@
+# --- the full 490 MB store must NEVER be committed (GitHub rejects >100 MB) ---
+data/demo.sqlite
+data/demo.sqlite-journal
+data/demo.sqlite-wal
+
+# the slim edition (data/demo_lite.sqlite, ~48 MB) and data/hero_examples.json ARE committed --
+# they are the deploy artifacts. Do not ignore them.
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- secrets / local env ---
+.env
+.env.*
+
+# --- notebooks / scratch ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+_duckdb_spill/

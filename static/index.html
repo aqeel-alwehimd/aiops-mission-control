@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>算力中心 Mission Control 自動化維運平台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Noto+Sans+TC:wght@300;400;500;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = { theme: { extend: {
+            fontFamily: { sans: ['"Noto Sans TC"','sans-serif'], tech: ['Orbitron','sans-serif'], mono: ['"Fira Code"','monospace'] },
+            colors: { dark:'#050B14', panel:'rgba(15,23,42,0.75)', panelborder:'rgba(56,189,248,0.2)',
+                cyan:{400:'#22d3ee',500:'#06b6d4'}, emerald:{400:'#34d399',500:'#10b981'}, rose:{500:'#f43f5e'}, amber:{400:'#fbbf24'} } } } }
+    </script>
+    <style>
+        body { background-color:#050B14; background-image: radial-gradient(circle at 15% 50%, rgba(6,182,212,0.08), transparent 25%), radial-gradient(circle at 85% 30%, rgba(244,63,94,0.05), transparent 25%); background-attachment:fixed; color:#e2e8f0; overflow-x:hidden; }
+        .scanlines { position:fixed; top:0; left:0; width:100vw; height:100vh; background:linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.1) 50%, rgba(0,0,0,0.1)); background-size:100% 4px; pointer-events:none; z-index:50; opacity:0.3; }
+        .glass-panel { background:var(--color-panel); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border:1px solid var(--color-panelborder); box-shadow:0 4px 6px -1px rgba(0,0,0,0.5), 0 0 20px rgba(6,182,212,0.05); border-radius:0.75rem; position:relative; overflow:hidden; }
+        .glass-panel::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg, transparent, rgba(34,211,238,0.5), transparent); }
+        .glow-text-cyan { text-shadow:0 0 10px rgba(34,211,238,0.7); }
+        .glow-text-rose { text-shadow:0 0 10px rgba(244,63,94,0.7); }
+        .status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+        .terminal-scroll::-webkit-scrollbar { width:6px; }
+        .terminal-scroll::-webkit-scrollbar-track { background:rgba(0,0,0,0.3); }
+        .terminal-scroll::-webkit-scrollbar-thumb { background:rgba(34,211,238,0.3); border-radius:3px; }
+        .nav-item.active { background:linear-gradient(90deg, rgba(34,211,238,0.1) 0%, transparent 100%); border-left:3px solid #22d3ee; color:#22d3ee; }
+        .tab-content { display:none; } .tab-content.active { display:block; animation:fadeIn 0.4s ease-out; }
+        @keyframes fadeIn { from { opacity:0; transform:translateY(10px);} to { opacity:1; transform:translateY(0);} }
+        input[type=range] { accent-color:#22d3ee; }
+        .na-tag { color:#64748b; font-style:italic; }
+        .clickable { cursor:pointer; }
+        #panel { transition: transform 0.3s ease-out; transform: translateX(100%); }
+        #panel.open { transform: translateX(0); }
+        .detail-scroll::-webkit-scrollbar { width:6px; } .detail-scroll::-webkit-scrollbar-thumb { background:rgba(34,211,238,0.3); border-radius:3px; }
+        .report-md h2 { font-size:1.05rem; font-weight:700; color:#e2e8f0; margin:0.2rem 0 0.6rem; }
+        .report-md h3 { font-size:0.85rem; font-weight:700; color:#22d3ee; margin:1rem 0 0.35rem; text-transform:uppercase; letter-spacing:0.04em; }
+        .report-md ul { list-style:disc; margin:0.2rem 0 0.6rem 1.25rem; }
+        .report-md li { margin:0.18rem 0; }
+        .report-md li.sub { list-style:circle; margin-left:1.1rem; color:#94a3b8; }
+        .report-md strong { color:#fff; } .report-md em { color:#8ea3bd; font-style:italic; }
+        .report-md p { margin:0.35rem 0; }
+    </style>
+</head>
+<body class="h-screen flex flex-col font-sans text-sm">
+    <div class="scanlines"></div>
+
+    <!-- Top Navigation Bar -->
+    <header class="glass-panel border-b-0 rounded-none h-16 flex items-center justify-between px-6 z-20 sticky top-0">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded bg-cyan-500/20 border border-cyan-500/50 flex items-center justify-center relative">
+                <i class="fa-solid fa-microchip text-cyan-400 text-xl"></i>
+                <div class="absolute inset-0 border border-cyan-400/50 rounded animate-pulse"></div>
+            </div>
+            <div>
+                <h1 class="font-tech text-xl font-bold tracking-wider text-white">AIOps <span class="text-cyan-400">MISSION CONTROL</span></h1>
+                <p class="text-xs text-slate-400" data-i18n="app.subtitle">Marconi100 ExaData · 真實模型回放</p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <!-- How-it-works + language toggle -->
+            <button onclick="openHowItWorks()" title="How this works" class="text-xs text-slate-300 hover:text-cyan-400 border border-slate-700 rounded px-2 py-1.5 flex items-center gap-1">
+                <i class="fa-solid fa-circle-question"></i> <span data-i18n="howitworks.btn">運作原理</span>
+            </button>
+            <button id="lang-toggle" onclick="toggleLang()" class="text-xs font-bold text-cyan-400 border border-cyan-500/50 rounded px-2 py-1.5 hover:bg-cyan-500/20">EN / 中文</button>
+
+            <div class="flex items-center gap-2 bg-slate-800/60 px-3 py-1.5 rounded-lg border border-slate-700">
+                <button id="btn-play" onclick="clockCmd('play')" title="Play / Pause" class="w-8 h-8 rounded bg-cyan-500/20 border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/40"><i id="play-icon" class="fa-solid fa-play"></i></button>
+                <button onclick="clockCmd('step',900)" title="Step +15 min" class="w-8 h-8 rounded bg-slate-700/50 border border-slate-600 text-slate-300 hover:text-white"><i class="fa-solid fa-forward-step"></i></button>
+                <button onclick="clockCmd('reset')" title="Reset" class="w-8 h-8 rounded bg-slate-700/50 border border-slate-600 text-slate-300 hover:text-white"><i class="fa-solid fa-rotate-left"></i></button>
+                <select id="sel-speed" onchange="clockCmd('speed',parseFloat(this.value))" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-cyan-500">
+                    <option value="900" data-i18n="speed.15m">15 分鐘/秒</option>
+                    <option value="3600" selected data-i18n="speed.1h">1 小時/秒</option>
+                    <option value="21600" data-i18n="speed.6h">6 小時/秒</option>
+                    <option value="86400" data-i18n="speed.1d">1 天/秒</option>
+                </select>
+                <input id="scrubber" type="range" min="0" max="1000" value="0" class="w-24" oninput="scrubbing=true" onchange="doScrub(this.value)">
+            </div>
+            <div class="flex flex-col items-end leading-tight">
+                <div class="font-mono text-cyan-400 text-lg glow-text-cyan" id="vclock">--:--:--</div>
+                <div class="text-[10px] text-slate-400" id="vdate">2022-09</div>
+            </div>
+            <div class="flex items-center gap-2 bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-700">
+                <span class="relative flex h-3 w-3"><span id="live-ping" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span id="live-dot" class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span></span>
+                <span id="replay-status" class="text-emerald-400 font-mono text-xs">REPLAY</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="flex flex-1 overflow-hidden">
+        <!-- Sidebar -->
+        <nav class="w-64 glass-panel rounded-none border-r-0 border-y-0 flex flex-col py-6 z-10">
+            <div class="px-6 mb-6">
+                <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Core Modules</p>
+                <ul class="space-y-1">
+                    <li><button onclick="switchTab('dashboard')" id="nav-dashboard" class="nav-item active w-full flex items-center gap-3 px-4 py-3 text-slate-300 hover:text-cyan-400 text-left rounded-r-lg"><i class="fa-solid fa-chart-line w-5 text-center"></i><span class="font-medium" data-i18n="tab.dashboard">戰情總覽 Dashboard</span></button></li>
+                    <li><button onclick="switchTab('nodes')" id="nav-nodes" class="nav-item w-full flex items-center gap-3 px-4 py-3 text-slate-300 hover:text-cyan-400 text-left rounded-r-lg"><i class="fa-solid fa-server w-5 text-center"></i><span class="font-medium" data-i18n="tab.nodes">節點管理 (IPMI)</span></button></li>
+                    <li><button onclick="switchTab('jobs')" id="nav-jobs" class="nav-item w-full flex items-center gap-3 px-4 py-3 text-slate-300 hover:text-cyan-400 text-left rounded-r-lg"><i class="fa-solid fa-network-wired w-5 text-center"></i><span class="font-medium" data-i18n="tab.jobs">任務監控 (Slurm)</span></button></li>
+                    <li><button onclick="switchTab('policies')" id="nav-policies" class="nav-item w-full flex items-center gap-3 px-4 py-3 text-slate-300 hover:text-cyan-400 text-left rounded-r-lg"><i class="fa-solid fa-shield-halved w-5 text-center"></i><span class="font-medium" data-i18n="tab.policies">修復策略 (Auto-Healing)</span></button></li>
+                </ul>
+            </div>
+            <div class="mt-auto px-6 mb-4">
+                <div class="bg-cyan-900/20 border border-cyan-800/50 rounded p-4 text-xs">
+                    <div class="flex items-center justify-between mb-2">
+                        <div class="flex items-center gap-2 text-cyan-400"><i class="fa-solid fa-robot"></i><span class="font-bold">AIOps Agent</span></div>
+                        <span id="agent-mode" class="text-[9px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400"></span>
+                    </div>
+                    <p class="text-slate-300 leading-relaxed" id="agent-status">…</p>
+                    <button onclick="openReport()" class="mt-3 w-full text-[11px] bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 rounded px-2 py-1.5 flex items-center justify-center gap-1"><i class="fa-solid fa-file-lines"></i> <span data-i18n="report.generate">產生交接報告</span></button>
+                </div>
+                <div class="mt-3 text-[10px] text-slate-500 leading-relaxed">
+                    P3 ROC <span class="text-slate-300" id="mi-p3roc">0.87</span> · P2 ROC <span class="text-slate-300" id="mi-p2roc">0.85</span>
+                    <button onclick="switchTab('policies')" class="text-cyan-500 hover:text-cyan-400 underline ml-1" data-i18n="sidebar.transparency">資料透明度</button>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main -->
+        <main class="flex-1 overflow-y-auto p-6 scroll-smooth terminal-scroll relative z-0">
+
+            <!-- DASHBOARD -->
+            <div id="tab-dashboard" class="tab-content active space-y-6">
+                <div class="grid grid-cols-4 gap-6">
+                    <div class="glass-panel p-5">
+                        <div class="flex justify-between items-start mb-2"><h3 class="text-slate-400 font-medium" data-i18n="kpi.util">叢集使用率 (Utilisation)</h3><i class="fa-solid fa-bolt text-amber-400 bg-amber-400/10 p-2 rounded"></i></div>
+                        <div class="flex items-baseline gap-2"><span class="text-3xl font-tech font-bold text-white" id="kpi-util">--</span><span class="text-sm text-slate-400">%</span></div>
+                        <div class="mt-3 text-xs text-amber-400/80 flex items-center gap-1"><i class="fa-solid fa-circle-info"></i><span data-i18n="kpi.util.sub">功耗推估 proxy · 非直接量測</span></div>
+                    </div>
+                    <div class="glass-panel p-5">
+                        <div class="flex justify-between items-start mb-2"><h3 class="text-slate-400 font-medium" data-i18n="kpi.active">活躍任務 (Active Jobs)</h3><i class="fa-solid fa-layer-group text-cyan-400 bg-cyan-400/10 p-2 rounded"></i></div>
+                        <div class="flex items-baseline gap-2"><span class="text-3xl font-tech font-bold text-white" id="kpi-active">--</span><span class="text-sm text-slate-400">Jobs</span></div>
+                        <div class="mt-3 text-xs text-cyan-400 flex items-center gap-1"><i class="fa-solid fa-spinner fa-spin"></i><span id="kpi-active-sub">--</span></div>
+                    </div>
+                    <div class="glass-panel p-5 border-rose-500/30">
+                        <div class="flex justify-between items-start mb-2"><h3 class="text-slate-400 font-medium" data-i18n="kpi.warn">異常風險預測 (P3)</h3><i class="fa-solid fa-triangle-exclamation text-rose-500 bg-rose-500/10 p-2 rounded"></i></div>
+                        <div class="flex items-baseline gap-2"><span class="text-3xl font-tech font-bold text-rose-500 glow-text-rose" id="kpi-warn">--</span><span class="text-sm text-slate-400">Warnings</span></div>
+                        <div class="mt-3 text-xs text-rose-400 flex items-center gap-1"><span id="kpi-warn-sub">--</span></div>
+                    </div>
+                    <div class="glass-panel p-5 border-amber-500/30">
+                        <div class="flex justify-between items-start mb-2"><h3 class="text-slate-400 font-medium" data-i18n="kpi.nodes">異常節點 (P2)</h3><i class="fa-solid fa-ban text-amber-400 bg-amber-400/10 p-2 rounded"></i></div>
+                        <div class="flex items-baseline gap-2"><span class="text-3xl font-tech font-bold text-amber-400" id="kpi-isolated">--</span><span class="text-sm text-slate-400">Nodes</span></div>
+                        <div class="mt-3 text-xs text-amber-400 flex items-center gap-1"><i class="fa-solid fa-shield-virus"></i><span id="kpi-isolated-sub">--</span></div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-3 gap-6">
+                    <div class="glass-panel col-span-1 p-5 flex flex-col">
+                        <h3 class="text-slate-200 font-bold mb-4 flex items-center gap-2"><i class="fa-solid fa-chart-pie text-cyan-400"></i> <span data-i18n="slurm.title">即時任務分佈 (Slurm States)</span></h3>
+                        <div class="flex-1 flex flex-col justify-center space-y-4" id="slurm-bars"></div>
+                    </div>
+                    <div class="glass-panel col-span-2 p-0 flex flex-col h-80">
+                        <div class="px-5 py-3 border-b border-slate-700/50 bg-slate-800/30 flex justify-between items-center">
+                            <h3 class="text-slate-200 font-bold flex items-center gap-2"><i class="fa-solid fa-terminal text-cyan-400"></i> <span data-i18n="logs.title">自動修復日誌牆 (Auto-Healing Logs)</span></h3>
+                            <span class="text-xs text-emerald-400 flex items-center gap-1"><span class="status-dot bg-emerald-400"></span> <span data-i18n="logs.real">真實事件 Real events</span></span>
+                        </div>
+                        <div class="p-4 flex-1 overflow-y-auto terminal-scroll font-mono text-xs space-y-1" id="log-container"></div>
+                    </div>
+                </div>
+                <div class="glass-panel p-4 text-xs text-slate-400 flex items-start gap-3">
+                    <i class="fa-solid fa-circle-info text-cyan-400 mt-0.5"></i><span data-i18n="dash.note">此儀表板回放 Marconi100 ExaData 2022-09 真實測試期。每個數字都是真實模型對真實資料的輸出；僅時間被壓縮。標示 N/A 的欄位該資料集未收集 (需 DCGM)。使用率為功耗推估 proxy。</span>
+                </div>
+            </div>
+
+            <!-- NODES -->
+            <div id="tab-nodes" class="tab-content space-y-6">
+                <div class="glass-panel p-4 text-xs text-amber-300/90 flex items-start gap-3 border-amber-500/20">
+                    <i class="fa-solid fa-triangle-exclamation mt-0.5"></i><span data-i18n="nodes.note">資料說明：Marconi100 節點為 IBM Power9 AC922 + 4× NVIDIA V100，非 DGX。溫度/功耗/風扇為真實 IPMI 遙測；VRAM 使用率、PCIe 錯誤率、MIG 狀態需 NVIDIA DCGM 遙測，此資料集未收集 → 標示 N/A。點擊任一列可查看該節點的模型輸入/輸出/歸因。</span>
+                </div>
+                <div class="glass-panel p-0">
+                    <div class="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-server text-cyan-400"></i> <span data-i18n="nodes.h">硬體層監測 (IPMI Health Monitoring)</span></h2>
+                        <div class="flex items-center gap-3 text-xs text-slate-400">
+                            <span id="node-summary">--</span>
+                            <select id="node-sort" onchange="refresh()" class="bg-slate-900 border border-slate-700 text-slate-200 rounded px-2 py-1.5 focus:outline-none focus:border-cyan-500">
+                                <option value="risk" data-i18n="sort.risk">排序：風險</option>
+                                <option value="temp" data-i18n="sort.temp">排序：溫度</option>
+                                <option value="power" data-i18n="sort.power">排序：功耗</option>
+                                <option value="node" data-i18n="sort.node">排序：節點</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse">
+                            <thead><tr class="bg-slate-800/50 text-slate-400 text-xs uppercase tracking-wider">
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.node">節點 (Node)</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.status">狀態 (Status)</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.tpf">溫度 / 功耗 / 風扇</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.p2risk">P2 風險分數</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50">VRAM</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50">PCIe</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50">MIG</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50 text-right" data-i18n="col.action">操作</th>
+                            </tr></thead>
+                            <tbody id="node-table-body" class="text-sm font-mono divide-y divide-slate-800/50"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- JOBS -->
+            <div id="tab-jobs" class="tab-content space-y-6">
+                <div class="glass-panel p-0">
+                    <div class="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center bg-slate-800/20">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-network-wired text-cyan-400"></i> <span data-i18n="jobs.h">任務狀態預測與追蹤 (P3 Job Prediction)</span></h2>
+                        <div class="flex items-center gap-3">
+                            <span id="job-summary" class="text-xs text-slate-400">--</span>
+                            <select id="job-state" onchange="refresh()" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-cyan-500">
+                                <option value="" data-i18n="filter.all">全部狀態</option>
+                                <option value="RUNNING">RUNNING</option><option value="PENDING">PENDING</option><option value="COMPLETED">COMPLETED</option>
+                                <option value="FAILED">FAILED</option><option value="TIMEOUT">TIMEOUT</option><option value="OUT_OF_MEMORY">OUT_OF_MEMORY</option>
+                            </select>
+                            <div class="relative"><i class="fa-solid fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-500 text-xs"></i>
+                                <input id="job-search" oninput="renderJobs()" type="text" placeholder="Search Job / User..." data-i18n-ph="jobs.search" class="bg-slate-900 border border-slate-700 rounded-md py-1.5 pl-9 pr-4 text-sm text-white focus:outline-none focus:border-cyan-500 w-56"></div>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse">
+                            <thead><tr class="bg-slate-800/50 text-slate-400 text-xs uppercase tracking-wider">
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.jobid">任務 ID (Job ID)</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.user">提交者 (User)</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.slurm">Slurm 狀態</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50 w-48" data-i18n="col.progress">進度 / 耗時</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.airisk">AI 預測風險 (P3)</th>
+                                <th class="px-6 py-3 border-b border-slate-700/50 text-right" data-i18n="col.snap">分層重啟/快照</th>
+                            </tr></thead>
+                            <tbody id="job-table-body" class="text-sm divide-y divide-slate-800/50"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- POLICIES -->
+            <div id="tab-policies" class="tab-content space-y-6">
+                <div class="max-w-4xl">
+                    <h2 class="text-2xl font-tech font-bold text-white mb-6" data-i18n="pol.title">修復策略設定 (Auto-Healing Policies)</h2>
+                    <div class="space-y-6">
+                        <div class="glass-panel p-6 border-l-4 border-l-cyan-500">
+                            <div class="flex justify-between items-start mb-4"><div>
+                                <h3 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-flag text-cyan-400"></i> <span data-i18n="pol.alert.h">P3 任務風險告警門檻</span></h3>
+                                <p class="text-slate-400 text-sm mt-1" data-i18n="pol.alert.help">P3 模型風險分數 ≥ 門檻的任務會被標記並觸發快照建議。調整此值會即時改變被標記的任務。</p>
+                            </div></div>
+                            <div class="grid grid-cols-2 gap-6 mt-4">
+                                <div><label class="block text-xs text-slate-400 mb-1" data-i18n="pol.alert.label">告警門檻 (risk ≥)</label>
+                                    <input id="pol-alert" type="range" min="0.05" max="0.95" step="0.05" value="0.30" class="w-full" oninput="document.getElementById('pol-alert-val').textContent=(+this.value).toFixed(2)">
+                                    <div class="text-right text-xs text-cyan-400 mt-1 font-mono"><span id="pol-alert-val">0.30</span> · <span data-i18n="pol.alert.op">建議操作點 0.30 (WARN)</span></div></div>
+                                <div><label class="block text-xs text-slate-400 mb-1" data-i18n="pol.oom.label">OOM 防護</label>
+                                    <label class="relative inline-flex items-center cursor-pointer mt-1"><input id="pol-oom" type="checkbox" class="sr-only peer" checked><div class="w-11 h-6 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div></label>
+                                    <p class="text-[11px] text-slate-500 mt-2" data-i18n="pol.oom.help">註：此資料集 SLURM 記憶體請求欄位為空，OOM 類別鮮少被預測為首要故障型態。</p></div>
+                            </div>
+                        </div>
+                        <div class="glass-panel p-6 border-l-4 border-l-rose-500">
+                            <div class="flex justify-between items-start mb-4"><div>
+                                <h3 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-filter text-rose-500"></i> <span data-i18n="pol.filter.h">P2 節點風險分流強度 (NODE_FAIL)</span></h3>
+                                <p class="text-slate-400 text-sm mt-1" data-i18n="pol.filter.help">依單一功耗指標 (PSU-0 輸入功率，低功耗=高風險) 只評分最可疑的 N% 節點槽位。收緊會提升 ROC (0.85→0.93)、降低評分節點數。</p>
+                            </div><label class="relative inline-flex items-center cursor-pointer"><input id="pol-nodeguard" type="checkbox" class="sr-only peer" checked><div class="w-11 h-6 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rose-500"></div></label></div>
+                            <div class="grid grid-cols-2 gap-6 mt-4">
+                                <div><label class="block text-xs text-slate-400 mb-1" data-i18n="pol.filter.label">分流強度：評分最可疑的 N%</label>
+                                    <input id="pol-filter" type="range" min="1" max="100" step="1" value="25" class="w-full" oninput="onFilterInput(this.value)">
+                                    <div class="text-right text-xs text-rose-400 mt-1 font-mono"><span data-i18n="pol.filter.riskiest">最可疑</span> <span id="pol-filter-val">25</span>% · PSU-0 ≤ <span id="pol-filter-watt">~286</span> W</div></div>
+                                <div><label class="block text-xs text-slate-400 mb-1" data-i18n="pol.temp.label">溫度上限自動隔離 (°C)</label>
+                                    <input id="pol-temp" type="number" value="92" class="bg-slate-900 border border-slate-700 text-white text-sm rounded block w-full p-2">
+                                    <p class="text-[11px] text-slate-500 mt-2" data-i18n="pol.temp.help">溫度來自真實 IPMI (cur_g0_cT / cur_g1_cT)。</p></div>
+                            </div>
+                        </div>
+                        <div class="glass-panel p-6 border-l-4 border-l-emerald-500">
+                            <div class="flex justify-between items-start mb-4"><div>
+                                <h3 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-camera-rotate text-emerald-400"></i> <span data-i18n="pol.ckpt.h">快速快照與分層重啟</span></h3>
+                                <p class="text-slate-400 text-sm mt-1" data-i18n="pol.ckpt.help">RUNNING 任務週期性狀態保存 + 故障節點無縫轉移 (示意動作)。</p>
+                            </div></div>
+                            <div class="grid grid-cols-2 gap-6 mt-4">
+                                <div><label class="block text-xs text-slate-400 mb-1" data-i18n="pol.ckpt.label">全局 Checkpoint 週期</label>
+                                    <select id="pol-checkpoint" class="bg-slate-900 border border-slate-700 text-white text-sm rounded block w-full p-2"><option value="5" data-i18n="pol.ckpt.5">每 5 分鐘</option><option value="15" selected data-i18n="pol.ckpt.15">每 15 分鐘</option><option value="30" data-i18n="pol.ckpt.30">每 30 分鐘</option></select></div>
+                                <div><label class="block text-xs text-slate-400 mb-1" data-i18n="pol.migrate.label">無縫轉移策略 (Migrate)</label>
+                                    <select id="pol-migrate" class="bg-slate-900 border border-slate-700 text-white text-sm rounded block w-full p-2"><option value="auto_healthy_node" selected data-i18n="pol.migrate.auto">自動尋找健康節點重啟</option><option value="pause_and_wait" data-i18n="pol.migrate.pause">僅暫停並等待原節點修復</option></select></div>
+                            </div>
+                            <div class="mt-4 pt-4 border-t border-slate-700/50 flex items-center gap-4">
+                                <button onclick="savePolicies()" class="bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/50 px-4 py-2 rounded text-sm flex items-center gap-2"><i class="fa-solid fa-floppy-disk"></i> <span data-i18n="pol.save">儲存策略設定</span></button>
+                                <span id="policy-status" class="text-xs text-slate-500"></span>
+                            </div>
+                        </div>
+                        <div class="glass-panel p-6 border-l-4 border-l-slate-500">
+                            <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-3"><i class="fa-solid fa-circle-info text-slate-300"></i> <span data-i18n="pol.info.h">模型資訊與資料透明度 (Model Info / Data Honesty)</span></h3>
+                            <div id="model-info-body" class="text-sm text-slate-300 space-y-3">…</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Drill-down side panel -->
+    <div id="overlay" class="fixed inset-0 bg-black/60 z-40 hidden" onclick="closePanel()"></div>
+    <aside id="panel" class="fixed top-0 right-0 h-full w-[500px] max-w-full glass-panel rounded-none border-l border-cyan-500/30 z-40 overflow-y-auto detail-scroll">
+        <div id="panel-body" class="p-6"></div>
+    </aside>
+
+    <!-- How-it-works modal -->
+    <div id="hiw" class="fixed inset-0 bg-black/70 z-40 hidden flex items-center justify-center p-6" onclick="closeHowItWorks(event)">
+        <div class="glass-panel max-w-2xl w-full p-8" onclick="event.stopPropagation()">
+            <div class="flex justify-between items-start mb-4">
+                <h2 class="text-xl font-tech font-bold text-white" data-i18n="hiw.title">運作原理 (How this works)</h2>
+                <button onclick="closeHowItWorks()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <ul id="hiw-list" class="space-y-3 text-sm text-slate-300 list-disc ml-5"></ul>
+            <p id="hiw-method" class="text-xs text-slate-500 mt-4 pt-4 border-t border-slate-700/50"></p>
+        </div>
+    </div>
+
+    <!-- Shift-report modal -->
+    <div id="report-modal" class="fixed inset-0 bg-black/70 z-40 hidden flex items-center justify-center p-6" onclick="if(event.target===this)closeReport()">
+        <div class="glass-panel w-full max-w-3xl max-h-[88vh] flex flex-col">
+            <div class="px-6 py-4 border-b border-slate-700/50 flex items-center justify-between gap-3">
+                <div class="flex items-center gap-3 min-w-0">
+                    <h2 class="text-lg font-bold text-white whitespace-nowrap" data-i18n="report.title">交接報告</h2>
+                    <span id="report-mode" class="text-[10px] px-2 py-0.5 rounded border whitespace-nowrap"></span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <label class="text-[11px] text-slate-500" data-i18n="report.window">視窗</label>
+                    <select id="report-window" onchange="openReport(true)" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500">
+                        <option value="1">1 h</option><option value="6" selected>6 h</option><option value="12">12 h</option><option value="24">24 h</option>
+                    </select>
+                    <button onclick="copyReport()" class="text-xs border border-slate-600 text-slate-300 hover:text-white rounded px-2 py-1"><i class="fa-solid fa-copy"></i> <span id="report-copy-label" data-i18n="report.copy">複製</span></button>
+                    <button onclick="downloadReport()" class="text-xs border border-slate-600 text-slate-300 hover:text-white rounded px-2 py-1"><i class="fa-solid fa-download"></i> <span data-i18n="report.download">下載 .md</span></button>
+                    <button onclick="closeReport()" class="text-slate-400 hover:text-white ml-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+                </div>
+            </div>
+            <div class="px-6 py-2 text-[11px] text-slate-500 border-b border-slate-800/60"><span data-i18n="report.generatedAt">產生於 (虛擬時間)</span>: <span id="report-genat" class="font-mono">—</span></div>
+            <div class="flex-1 overflow-y-auto detail-scroll px-6 py-4">
+                <div id="report-body" class="text-sm text-slate-200 leading-relaxed report-md"></div>
+                <details class="mt-6 border-t border-slate-700/50 pt-3">
+                    <summary class="cursor-pointer text-xs text-cyan-400" data-i18n="report.rawfacts">原始事實 (JSON — 報告的依據)</summary>
+                    <pre id="report-facts" class="mt-2 text-[10px] text-slate-400 bg-slate-900/60 rounded p-3 overflow-x-auto detail-scroll" style="max-height:40vh"></pre>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ================= i18n =================
+        const I18N = {
+          zh: {
+            "app.subtitle":"Marconi100 ExaData · 真實模型回放","howitworks.btn":"運作原理",
+            "speed.15m":"15 分鐘/秒","speed.1h":"1 小時/秒","speed.6h":"6 小時/秒","speed.1d":"1 天/秒",
+            "tab.dashboard":"戰情總覽 Dashboard","tab.nodes":"節點管理 (IPMI)","tab.jobs":"任務監控 (Slurm)","tab.policies":"修復策略 (Auto-Healing)",
+            "sidebar.transparency":"資料透明度",
+            "kpi.util":"叢集使用率 (Utilisation)","kpi.util.sub":"功耗推估 proxy · 非直接量測","kpi.active":"活躍任務 (Active Jobs)","kpi.warn":"異常風險預測 (P3)","kpi.nodes":"異常節點 (P2)",
+            "slurm.title":"即時任務分佈 (Slurm States)","logs.title":"自動修復日誌牆 (Auto-Healing Logs)","logs.real":"真實事件 Real events",
+            "dash.note":"此儀表板回放 Marconi100 ExaData 2022-09 真實測試期。每個數字都是真實模型 (P3 任務、P2 節點) 對真實資料的輸出；僅時間被壓縮。標示 N/A 的欄位該資料集未收集 (需 DCGM)。使用率為功耗推估之 proxy。",
+            "nodes.note":"資料說明：Marconi100 節點為 IBM Power9 AC922 + 4× NVIDIA V100，非 DGX。溫度/功耗/風扇為真實 IPMI 遙測；VRAM 使用率、PCIe 錯誤率、MIG 狀態需 NVIDIA DCGM 遙測，此資料集未收集 → 標示 N/A。點擊任一列可查看該節點的模型輸入/輸出/歸因。",
+            "nodes.h":"硬體層監測 (IPMI Health Monitoring)","sort.risk":"排序：風險","sort.temp":"排序：溫度","sort.power":"排序：功耗","sort.node":"排序：節點",
+            "col.node":"節點 (Node)","col.status":"狀態 (Status)","col.tpf":"溫度 / 功耗 / 風扇","col.p2risk":"P2 風險分數","col.action":"操作",
+            "jobs.h":"任務狀態預測與追蹤 (P3 Job Prediction)","filter.all":"全部狀態","jobs.search":"搜尋 任務 / 使用者...",
+            "col.jobid":"任務 ID (Job ID)","col.user":"提交者 (User)","col.slurm":"Slurm 狀態","col.progress":"進度 / 耗時","col.airisk":"AI 預測風險 (P3)","col.snap":"分層重啟/快照",
+            "pol.title":"修復策略設定 (Auto-Healing Policies)","pol.alert.h":"P3 任務風險告警門檻","pol.alert.help":"P3 模型風險分數 ≥ 門檻的任務會被標記並觸發快照建議。調整此值會即時改變被標記的任務。","pol.alert.label":"告警門檻 (risk ≥)","pol.alert.op":"建議操作點 0.30 (WARN)",
+            "pol.oom.label":"OOM 防護","pol.oom.help":"註：此資料集 SLURM 記憶體請求欄位為空，OOM 類別鮮少被預測為首要故障型態。",
+            "pol.filter.h":"P2 節點風險分流強度 (NODE_FAIL)","pol.filter.help":"依單一功耗指標 (PSU-0 輸入功率，低功耗=高風險) 只評分最可疑的 N% 節點槽位。收緊會提升 ROC (0.85→0.93)、降低評分節點數。","pol.filter.label":"分流強度：評分最可疑的 N%","pol.filter.riskiest":"最可疑",
+            "pol.temp.label":"溫度上限自動隔離 (°C)","pol.temp.help":"溫度來自真實 IPMI (cur_g0_cT / cur_g1_cT)。",
+            "pol.ckpt.h":"快速快照與分層重啟","pol.ckpt.help":"RUNNING 任務週期性狀態保存 + 故障節點無縫轉移 (示意動作)。","pol.ckpt.label":"全局 Checkpoint 週期","pol.ckpt.5":"每 5 分鐘","pol.ckpt.15":"每 15 分鐘","pol.ckpt.30":"每 30 分鐘",
+            "pol.migrate.label":"無縫轉移策略 (Migrate)","pol.migrate.auto":"自動尋找健康節點重啟","pol.migrate.pause":"僅暫停並等待原節點修復","pol.save":"儲存策略設定","pol.info.h":"模型資訊與資料透明度 (Model Info / Data Honesty)",
+            "hiw.title":"運作原理 (How this works)",
+            "d.input":"輸入 (INPUT)","d.output":"輸出 (OUTPUT)","d.why":"歸因 (WHY)","d.input.req":"資源請求","d.input.hist":"使用者歷史","d.imputed":"缺值→以中位數填補","d.null":"無值",
+            "d.why.global":"全域重要性 (跨所有任務，非此列的個別歸因)","d.why.per":"個別預測歸因 (此時槽的 LightGBM 貢獻，log-odds)","d.importance":"重要性","d.thisval":"此列數值","d.contrib":"貢獻","d.increases":"↑ 提高風險","d.decreases":"↓ 降低風險",
+            "d.risk":"風險分數","d.predclass":"預測類別","d.threshold":"操作門檻","d.flagged":"已標記","d.notflagged":"未標記","d.inscope":"評分中 (在分流範圍內)","d.outscope":"分流略過 (低功耗指標判為低風險)","d.close":"關閉","d.probs":"各類別機率",
+            "empty.jobs":"此時間點暫無任務","empty.nodes":"此時間點暫無節點資料","empty.logs":"此時間點暫無事件","node.triaged":"分流略過 (低風險)","job.ended":"已結束","risk.low":"低風險","risk.threshold":"門檻","node.showing":"顯示","node.of":"/","node.scoring":"評分中","node.band":"低功耗帶","node.anom":"異常","node.warn":"警示","job.showing":"顯示","job.rows":"筆 (在險/最近結束)",
+            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":"下載 .md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板"
+          },
+          en: {
+            "app.subtitle":"Marconi100 ExaData · real-model replay","howitworks.btn":"How it works",
+            "speed.15m":"15 min/s","speed.1h":"1 hour/s","speed.6h":"6 hours/s","speed.1d":"1 day/s",
+            "tab.dashboard":"Dashboard","tab.nodes":"Nodes (IPMI)","tab.jobs":"Jobs (Slurm)","tab.policies":"Policies (Auto-Healing)",
+            "sidebar.transparency":"Data transparency",
+            "kpi.util":"Utilisation (proxy)","kpi.util.sub":"power-derived proxy · not measured","kpi.active":"Active Jobs","kpi.warn":"Risk warnings (P3)","kpi.nodes":"Anomalous nodes (P2)",
+            "slurm.title":"Live job distribution (Slurm)","logs.title":"Auto-Healing Logs","logs.real":"Real events",
+            "dash.note":"This dashboard replays the real Marconi100 ExaData 2022-09 test period. Every number is a real model output (P3 jobs, P2 nodes) on real data; only time is compressed. Fields marked N/A are not collected in this dataset (need DCGM). Utilisation is a power-derived proxy.",
+            "nodes.note":"Note: Marconi100 nodes are IBM Power9 AC922 + 4× NVIDIA V100, not DGX. Temperature/power/fan are real IPMI telemetry; VRAM usage, PCIe error rate and MIG status need NVIDIA DCGM telemetry which this dataset does not carry → shown as N/A. Click any row to see that node's model input / output / attribution.",
+            "nodes.h":"Hardware monitoring (IPMI Health)","sort.risk":"Sort: risk","sort.temp":"Sort: temp","sort.power":"Sort: power","sort.node":"Sort: node",
+            "col.node":"Node","col.status":"Status","col.tpf":"Temp / Power / Fan","col.p2risk":"P2 risk score","col.action":"Action",
+            "jobs.h":"Job outcome prediction & tracking (P3)","filter.all":"All states","jobs.search":"Search Job / User...",
+            "col.jobid":"Job ID","col.user":"User","col.slurm":"Slurm state","col.progress":"Progress / elapsed","col.airisk":"AI predicted risk (P3)","col.snap":"Restart / checkpoint",
+            "pol.title":"Auto-Healing Policies","pol.alert.h":"P3 job-risk alert threshold","pol.alert.help":"Jobs whose P3 risk ≥ threshold are flagged and prompt a checkpoint. Changing this immediately changes which jobs are flagged.","pol.alert.label":"Alert threshold (risk ≥)","pol.alert.op":"recommended operating point 0.30 (WARN)",
+            "pol.oom.label":"OOM protection","pol.oom.help":"Note: SLURM memory-request columns are null in this dataset, so OOM is rarely the top predicted failure type.",
+            "pol.filter.h":"P2 node risk-filter strength (NODE_FAIL)","pol.filter.help":"Score only the riskiest N% of node-slots by a single power indicator (PSU-0 input power; low power = risk). Tightening raises ROC (0.85→0.93) and scores fewer nodes.","pol.filter.label":"Filter strength: score the riskiest N%","pol.filter.riskiest":"riskiest",
+            "pol.temp.label":"Auto-isolate temperature limit (°C)","pol.temp.help":"Temperature is real IPMI (cur_g0_cT / cur_g1_cT).",
+            "pol.ckpt.h":"Fast checkpoint & tiered restart","pol.ckpt.help":"Periodic state-save for RUNNING jobs + seamless migration of failed nodes (illustrative action).","pol.ckpt.label":"Global checkpoint interval","pol.ckpt.5":"every 5 min","pol.ckpt.15":"every 15 min","pol.ckpt.30":"every 30 min",
+            "pol.migrate.label":"Migration strategy","pol.migrate.auto":"auto-find healthy node & restart","pol.migrate.pause":"pause & wait for original node","pol.save":"Save policy","pol.info.h":"Model Info / Data Honesty",
+            "hiw.title":"How this works",
+            "d.input":"INPUT","d.output":"OUTPUT","d.why":"WHY","d.input.req":"Resource request","d.input.hist":"User history","d.imputed":"null → median-imputed","d.null":"no value",
+            "d.why.global":"Global importance (across all jobs — NOT this row's per-prediction attribution)","d.why.per":"Per-prediction attribution (this slot's LightGBM contributions, log-odds)","d.importance":"importance","d.thisval":"this row","d.contrib":"contribution","d.increases":"↑ raises risk","d.decreases":"↓ lowers risk",
+            "d.risk":"Risk score","d.predclass":"Predicted class","d.threshold":"Operating threshold","d.flagged":"Flagged","d.notflagged":"Not flagged","d.inscope":"Scored (in triage scope)","d.outscope":"Triaged out (cheap power indicator judged it low-risk)","d.close":"Close","d.probs":"Class probabilities",
+            "empty.jobs":"No jobs at this time","empty.nodes":"No node data at this time","empty.logs":"No events at this time","node.triaged":"Triaged (low-risk)","job.ended":"Ended","risk.low":"Low","risk.threshold":"threshold","node.showing":"Showing","node.of":"of","node.scoring":"scoring","node.band":"low-power band","node.anom":"anomalous","node.warn":"at-risk","job.showing":"Showing","job.rows":"rows (active / recently ended)",
+            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":"Download .md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl"
+          }
+        };
+        let lang = localStorage.getItem('lang') || 'zh';
+        const t = k => (I18N[lang] && I18N[lang][k]) || (I18N.zh[k]) || k;
+        function applyI18n() {
+            document.documentElement.lang = (lang === 'zh') ? 'zh-TW' : 'en';
+            document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.getAttribute('data-i18n')); });
+            document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.getAttribute('data-i18n-ph')); });
+            document.getElementById('lang-toggle').textContent = (lang === 'zh') ? 'EN' : '中文';
+        }
+        function toggleLang() {
+            lang = (lang === 'zh') ? 'en' : 'zh'; localStorage.setItem('lang', lang);
+            applyI18n(); loadModelInfo(); refresh();
+            if (lastDetail) renderDetail(lastDetail);
+            refreshBrief(true);
+            if (!document.getElementById('report-modal').classList.contains('hidden')) openReport(true);
+        }
+
+        // ================= state =================
+        let currentTab='dashboard', scrubbing=false, lastJobs=[], cutoffs={}, curThr=0.30, lastDetail=null;
+        let reportData=null, briefAt=0;
+        const $ = id => document.getElementById(id);
+        async function api(p,o){ const r=await fetch(p,o); if(!r.ok) throw new Error(p+' '+r.status); return r.json(); }
+        const post = (p,b) => api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+
+        function switchTab(id){ currentTab=id; document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active')); $('tab-'+id).classList.add('active'); $('nav-'+id).classList.add('active'); refresh(); }
+
+        // ================= clock =================
+        async function clockCmd(a,v){ try{ applyClock(await post('/api/clock',{action:a,value:v})); refresh(); }catch(e){console.error(e);} }
+        function doScrub(v){ scrubbing=false; clockCmd('jump_frac', v/1000); }
+        function applyClock(st){
+            $('vclock').textContent = new Date(st.virtual_ts*1000).toISOString().substr(11,8);
+            $('vdate').textContent = st.virtual_iso.substr(0,10);
+            $('play-icon').className = st.paused?'fa-solid fa-play':'fa-solid fa-pause';
+            $('replay-status').textContent = st.paused?'PAUSED':'PLAYING';
+            $('replay-status').className = 'font-mono text-xs '+(st.paused?'text-amber-400':'text-emerald-400');
+            $('live-dot').className='relative inline-flex rounded-full h-3 w-3 '+(st.paused?'bg-amber-500':'bg-emerald-500');
+            $('live-ping').style.display = st.paused?'none':'';
+            if(!scrubbing) $('scrubber').value = Math.round(st.progress*1000);
+        }
+
+        function fmtMin(m){ if(m==null) return '<span class="na-tag">N/A</span>'; m=Math.max(0,Math.round(m)); const h=Math.floor(m/60),mm=m%60; return (h>0?h+'h ':'')+mm+'m'; }
+        const naMark = () => '<span class="na-tag">N/A</span>';
+
+        // ================= renderers =================
+        function renderSummary(s){
+            $('kpi-util').textContent = s.utilisation_pct==null?'--':s.utilisation_pct;
+            $('kpi-active').textContent = s.active_jobs.toLocaleString();
+            $('kpi-active-sub').textContent = s.running.toLocaleString()+' RUNNING / '+s.pending.toLocaleString()+' PENDING';
+            $('kpi-warn').textContent = s.warnings.total.toLocaleString();
+            $('kpi-warn-sub').textContent = s.warnings.OOM+' OOM / '+s.warnings.TIMEOUT+' Timeout / '+s.warnings.FAILED+' Failed';
+            $('kpi-isolated').textContent = s.nodes_anomalous;
+            $('kpi-isolated-sub').textContent = s.nodes_at_risk+' '+t('node.warn')+' / '+s.nodes_isolated+' DRAIN';
+            const sl=s.slurm, tot=Math.max(1,sl.RUNNING+sl.PENDING+sl.COMPLETED+sl.FAILED);
+            const bar=(lab,c,n,cls)=>`<div><div class="flex justify-between text-xs mb-1"><span class="${cls}"><span class="status-dot ${c} mr-1"></span>${n.toLocaleString()} ${lab}</span><span class="text-slate-300 font-mono">${(100*n/tot).toFixed(0)}%</span></div><div class="w-full bg-slate-800 rounded-full h-2"><div class="${c} h-2 rounded-full" style="width:${(100*n/tot).toFixed(1)}%"></div></div></div>`;
+            $('slurm-bars').innerHTML = bar('RUNNING','bg-emerald-400',sl.RUNNING,'text-emerald-400')+bar('PENDING','bg-amber-400',sl.PENDING,'text-amber-400')+bar('FAILED / TIMEOUT / OOM','bg-rose-500',sl.FAILED,'text-rose-500')+bar('COMPLETED','bg-slate-500',sl.COMPLETED,'text-slate-400');
+            // the AIOps Agent box text is driven by the auto-generated brief report (refreshBrief), not here
+        }
+
+        // ================= ops report =================
+        function mdToHtml(md){
+            const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const inl=s=>esc(s).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>');
+            let html='', inList=false; const close=()=>{ if(inList){html+='</ul>';inList=false;} };
+            for(const ln of md.split('\n')){
+                if(/^##\s/.test(ln)){ close(); html+='<h3>'+inl(ln.replace(/^##\s/,''))+'</h3>'; }
+                else if(/^#\s/.test(ln)){ close(); html+='<h2>'+inl(ln.replace(/^#\s/,''))+'</h2>'; }
+                else if(/^\s*-\s/.test(ln)){ if(!inList){html+='<ul>';inList=true;} const sub=/^\s{2,}-\s/.test(ln); html+='<li class="'+(sub?'sub':'')+'">'+inl(ln.replace(/^\s*-\s/,''))+'</li>'; }
+                else if(ln.trim()===''){ close(); }
+                else { close(); html+='<p>'+inl(ln)+'</p>'; }
+            }
+            close(); return html;
+        }
+        function modeBadge(el, mode, full){
+            let key='report.mode.template', cls='border-slate-600 text-slate-400';
+            if(mode==='llm'){ key= full?'report.mode.llm':'report.mode.short.llm'; cls='border-emerald-500/40 text-emerald-400'; }
+            else if(mode==='template_llm_rejected'){ key='report.mode.rejected'; cls='border-amber-500/40 text-amber-400'; }
+            else { key= full?'report.mode.template':'report.mode.short.template'; }
+            el.textContent = t(key); el.className = el.className.replace(/border-\S+|text-\S+/g,'').trim()+' '+cls;
+        }
+        async function refreshBrief(force){
+            const now=Date.now(); if(!force && now-briefAt<12000) return; briefAt=now;
+            try{ const d=await api('/api/report?length=brief&window=6&lang='+lang);
+                $('agent-status').textContent=d.text; modeBadge($('agent-mode'), d.mode, false);
+            }catch(e){ /* leave last text */ }
+        }
+        async function openReport(regen){
+            document.getElementById('report-modal').classList.remove('hidden');
+            const w=parseInt(document.getElementById('report-window').value||6);
+            document.getElementById('report-body').innerHTML='<div class="text-slate-500 py-10 text-center">'+t('report.loading')+'</div>';
+            try{
+                const d=await api('/api/report?length=full&window='+w+'&lang='+lang);
+                reportData=d; renderReport(d);
+            }catch(e){ document.getElementById('report-body').textContent='error: '+e; }
+        }
+        function renderReport(d){
+            reportData=d;
+            document.getElementById('report-body').innerHTML=mdToHtml(d.text);
+            document.getElementById('report-facts').textContent=JSON.stringify(d.facts,null,2);
+            document.getElementById('report-genat').textContent=d.generated_iso+(d.cached?' (cached)':'');
+            const b=document.getElementById('report-mode'); b.className='text-[10px] px-2 py-0.5 rounded border whitespace-nowrap';
+            modeBadge(b, d.mode, true);
+        }
+        function closeReport(){ document.getElementById('report-modal').classList.add('hidden'); }
+        async function copyReport(){
+            if(!reportData) return;
+            try{ await navigator.clipboard.writeText(reportData.text); }
+            catch(e){ const ta=document.createElement('textarea'); ta.value=reportData.text; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(_){} ta.remove(); }
+            const l=document.getElementById('report-copy-label'), o=l.textContent; l.textContent=t('report.copied'); setTimeout(()=>l.textContent=o,1500);
+        }
+        function downloadReport(){
+            if(!reportData) return;
+            const stamp=(reportData.generated_iso||'').replace(/[^0-9]/g,'').slice(0,12);
+            const blob=new Blob([reportData.text],{type:'text/markdown;charset=utf-8'});
+            const url=URL.createObjectURL(blob), a=document.createElement('a');
+            a.href=url; a.download='shift-report-'+stamp+'-'+lang+'.md'; document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(()=>URL.revokeObjectURL(url),1000);
+        }
+        function renderLogs(d){
+            const ic={CRITICAL:'fa-radiation',ERROR:'fa-bug',WARNING:'fa-exclamation-triangle',INFO:'fa-check-circle'};
+            const co={CRITICAL:'text-rose-500',ERROR:'text-rose-400',WARNING:'text-amber-400',INFO:'text-cyan-400'};
+            $('log-container').innerHTML = d.logs.map(l=>`<div class="font-mono flex items-start gap-3 py-1 px-2 ${l.level==='CRITICAL'?'bg-rose-500/10 border-l-2 border-rose-500':''}"><span class="text-slate-500 shrink-0">[${l.time}]</span><span class="${co[l.level]||'text-slate-300'} shrink-0 w-20">[${l.level}]</span><span class="text-slate-400 shrink-0 w-28"><i class="fa-solid ${ic[l.level]||'fa-info-circle'} mr-1 text-[10px]"></i>${l.module}</span><span class="text-slate-200">${l.msg}</span></div>`).join('') || `<div class="text-slate-500 text-center py-8">${t('empty.logs')}</div>`;
+        }
+        function renderNodesData(d){
+            $('node-summary').innerHTML = `${t('node.showing')} ${d.count} ${t('node.of')} ${d.nodes_total} · ${t('node.scoring')} <span class="text-cyan-400">${d.nodes_scored}</span> (${t('node.band')} ${d.nodes_in_scope_pct}%) · <span class="text-rose-400">${d.state_counts.CRITICAL}</span> ${t('node.anom')} / <span class="text-amber-400">${d.state_counts.WARNING}</span> ${t('node.warn')}`;
+            const badge={CRITICAL:'<span class="bg-rose-500/20 text-rose-400 px-2 py-1 rounded text-xs border border-rose-500/30 glow-text-rose"><i class="fa-solid fa-radiation mr-1"></i>CRITICAL</span>',WARNING:'<span class="bg-amber-500/20 text-amber-400 px-2 py-1 rounded text-xs border border-amber-500/30"><i class="fa-solid fa-triangle-exclamation mr-1"></i>WARNING</span>',HEALTHY:'<span class="bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded text-xs border border-emerald-500/30"><i class="fa-solid fa-check-circle mr-1"></i>HEALTHY</span>'};
+            $('node-table-body').innerHTML = d.nodes.map(n=>{
+                const temp=n.temp==null?'<span class="na-tag">—</span>':n.temp+'°C', pw=n.power==null?'—':n.power+'W', fan=n.fan==null?'—':Math.round(n.fan)+'rpm';
+                const risk=n.scored?`<div class="flex items-center gap-2"><div class="w-16 bg-slate-800 rounded-full h-1.5"><div class="${n.risk_pct>=50?'bg-rose-500':n.risk_pct>=15?'bg-amber-400':'bg-emerald-400'} h-1.5 rounded-full" style="width:${Math.min(100,n.risk_pct)}%"></div></div><span class="text-xs ${n.risk_pct>=50?'text-rose-400 font-bold':'text-slate-400'}">${n.risk_pct}%</span></div>`:`<span class="na-tag text-[11px]">${t('node.triaged')}</span>`;
+                return `<tr class="hover:bg-slate-800/30 clickable" onclick="openNodeDetail(${n.node})"><td class="px-6 py-3"><div class="font-bold text-white">${n.node_label}</div><div class="text-[10px] text-slate-500">rack ${n.rack}${n.onset?' · <span class="text-rose-400">onset</span>':''}</div></td><td class="px-6 py-3">${badge[n.state]}</td><td class="px-6 py-3 text-slate-300 text-xs">${temp} / ${pw} / ${fan}</td><td class="px-6 py-3 w-40">${risk}</td><td class="px-6 py-3">${naMark()}</td><td class="px-6 py-3">${naMark()}</td><td class="px-6 py-3">${naMark()}</td><td class="px-6 py-3 text-right">${n.isolated?`<button onclick="event.stopPropagation()" class="text-xs border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/20 px-3 py-1 rounded">解除隔離</button>`:`<button onclick="event.stopPropagation()" class="text-xs border border-slate-600 text-slate-400 hover:text-white px-3 py-1 rounded">DRAIN</button>`}</td></tr>`;
+            }).join('') || `<tr><td colspan="8" class="text-center text-slate-500 py-8">${t('empty.nodes')}</td></tr>`;
+        }
+        function renderJobs(){
+            const q=($('job-search').value||'').toLowerCase(); let jobs=lastJobs;
+            if(q) jobs=jobs.filter(j=>(''+j.job_id).includes(q)||j.user.toLowerCase().includes(q));
+            const sc=st=>st==='RUNNING'?'text-emerald-400':st==='PENDING'?'text-amber-400':st==='COMPLETED'?'text-slate-400':'text-rose-500 glow-text-rose';
+            const si=st=>st==='RUNNING'?'fa-play':st==='PENDING'?'fa-hourglass-half':st==='COMPLETED'?'fa-check':'fa-skull-crossbones';
+            $('job-table-body').innerHTML = jobs.map(j=>{
+                let rb;
+                if(!j.active) rb=`<span class="text-xs text-slate-500">${t('job.ended')} (${j.final_state})</span>`;
+                else if(j.flagged){ const cls=j.band==='high'?'text-rose-400 bg-rose-500/10 border-rose-500/30':'text-amber-400 bg-amber-400/10 border-amber-500/30'; rb=`<span class="text-xs ${cls} px-2 py-1 rounded border"><i class="fa-solid fa-triangle-exclamation"></i> ${j.pred_type} · ${j.risk_pct}%</span>`; }
+                else rb=`<span class="text-xs text-emerald-400/70"><i class="fa-solid fa-check"></i> ${t('risk.low')} · ${j.risk_pct}%</span>`;
+                const mig=j.active&&j.flagged;
+                return `<tr class="hover:bg-slate-800/30 clickable" onclick="openJobDetail(${j.job_id})"><td class="px-6 py-3 font-mono text-cyan-400">${j.job_id}</td><td class="px-6 py-3 text-slate-300"><i class="fa-regular fa-user mr-1 text-slate-500"></i>${j.user}<span class="text-[10px] text-slate-600 ml-1">${j.partition}/${j.qos}</span></td><td class="px-6 py-3 font-bold ${sc(j.status)} text-xs"><i class="fa-solid ${si(j.status)} mr-1"></i>${j.status}</td><td class="px-6 py-3"><div class="flex items-center justify-between text-xs mb-1"><span class="text-slate-400">${j.progress}%</span><span class="text-slate-500 font-mono">${fmtMin(j.elapsed_min)} / ${fmtMin(j.req_walltime_min)}</span></div><div class="w-full bg-slate-800 rounded-full h-1"><div class="${j.flagged?'bg-rose-500':'bg-cyan-500'} h-1 rounded-full" style="width:${j.progress}%"></div></div></td><td class="px-6 py-3">${rb}</td><td class="px-6 py-3 text-right">${mig?'<button onclick="event.stopPropagation()" class="bg-cyan-500 text-slate-900 text-xs font-bold px-3 py-1 rounded hover:bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"><i class="fa-solid fa-camera"></i></button>':'<button onclick="event.stopPropagation()" class="text-slate-600 text-xs px-2 py-1"><i class="fa-solid fa-camera"></i></button>'}</td></tr>`;
+            }).join('') || `<tr><td colspan="6" class="text-center text-slate-500 py-8">${t('empty.jobs')}</td></tr>`;
+        }
+
+        // ================= drill-down =================
+        async function openJobDetail(id){ try{ lastDetail=await api('/api/jobs/'+id); renderDetail(lastDetail); openPanel(); }catch(e){console.error(e);} }
+        async function openNodeDetail(id){ try{ lastDetail=await api('/api/nodes/'+id); renderDetail(lastDetail); openPanel(); }catch(e){console.error(e);} }
+        function openPanel(){ $('overlay').classList.remove('hidden'); $('panel').classList.add('open'); }
+        function closePanel(){ $('overlay').classList.add('hidden'); $('panel').classList.remove('open'); lastDetail=null; }
+        const lbl = x => lang==='en' ? x.label_en : x.label_zh;
+        function fmtVal(v){ return v==null?`<span class="na-tag">${t('d.null')}</span>`:(typeof v==='number'?(Number.isInteger(v)?v:v.toFixed(3).replace(/\.?0+$/,'')):v); }
+
+        function renderDetail(d){
+            const en=lang==='en';
+            let head, badge;
+            if(d.kind==='job'){
+                head=`Job ${d.id} · ${d.user}`;
+                badge=`<span class="text-xs px-2 py-0.5 rounded border ${d.state==='COMPLETED'?'text-slate-400 border-slate-600':'text-rose-400 border-rose-500/40'}">${d.state}</span>`;
+            } else {
+                head=`${d.node_label} · rack ${d.rack}`;
+                const c={CRITICAL:'text-rose-400 border-rose-500/40',WARNING:'text-amber-400 border-amber-500/40',HEALTHY:'text-emerald-400 border-emerald-500/40'}[d.state];
+                badge=`<span class="text-xs px-2 py-0.5 rounded border ${c}">${d.state}</span>`;
+            }
+            const when = en?d.when_en:d.when_zh;
+            const o=d.output;
+            // OUTPUT block
+            let outHtml=`<div class="flex items-baseline gap-2 mb-2"><span class="text-3xl font-tech font-bold ${o.risk_pct>=50?'text-rose-500 glow-text-rose':o.risk_pct>=30?'text-amber-400':'text-emerald-400'}">${o.risk_pct}%</span><span class="text-xs text-slate-400">${t('d.risk')}</span></div>`;
+            outHtml+=`<div class="text-xs text-slate-300 space-y-1">`;
+            if(d.kind==='job'){
+                outHtml+=`<div>${t('d.predclass')}: <b>${en?o.predicted_class_en:o.predicted_class_zh}</b> <span class="text-slate-500">(${o.predicted_class})</span></div>`;
+                outHtml+=`<div class="text-[11px] text-slate-500">${t('d.probs')}: `+Object.entries(o.class_probs).map(([k,v])=>`${k} ${(v*100).toFixed(1)}%`).join(' · ')+`</div>`;
+            } else {
+                outHtml+=`<div>${o.in_scope?('<span class="text-cyan-400">'+t('d.inscope')+'</span>'):('<span class="na-tag">'+t('d.outscope')+'</span>')}${o.cutoff_watts?` · PSU-0 ≤ ${o.cutoff_watts}W`:''}</div>`;
+            }
+            outHtml+=`<div>${t('d.threshold')}: ${o.threshold} → ${o.flagged?('<span class="text-rose-400 font-bold">'+t('d.flagged')+'</span>'):('<span class="text-emerald-400">'+t('d.notflagged')+'</span>')}</div></div>`;
+            // INPUT block
+            let inHtml='';
+            if(d.kind==='job'){
+                for(const grp of ['request','history']){
+                    const rows=d.input.filter(x=>x.group===grp); if(!rows.length) continue;
+                    inHtml+=`<div class="text-[11px] uppercase tracking-wider text-slate-500 mt-3 mb-1">${grp==='request'?t('d.input.req'):t('d.input.hist')}</div>`;
+                    inHtml+=rows.map(x=>`<div class="flex justify-between py-1 border-b border-slate-800/60"><span class="text-slate-400">${lbl(x)}</span><span class="font-mono ${x.imputed?'text-amber-400/70':'text-slate-200'}">${fmtVal(x.value)}${x.imputed?' <span class="text-[10px]">('+t('d.imputed')+')</span>':''}</span></div>`).join('');
+                }
+            } else {
+                inHtml=d.input.map(x=>`<div class="flex justify-between py-1 border-b border-slate-800/60"><span class="text-slate-400">${lbl(x)}</span><span class="font-mono text-slate-200">${fmtVal(x.value)}</span></div>`).join('');
+            }
+            // WHY block
+            let whyHtml=`<div class="text-[11px] text-slate-500 mb-2">${d.why_kind==='global'?t('d.why.global'):t('d.why.per')}</div>`;
+            if(d.kind==='job'){
+                const mx=Math.max(...d.why.map(w=>w.importance),0.0001);
+                whyHtml+=d.why.map(w=>`<div class="py-1"><div class="flex justify-between text-xs"><span class="text-slate-300">${lbl(w)}</span><span class="font-mono text-slate-400">${t('d.thisval')} ${fmtVal(w.value)}</span></div><div class="w-full bg-slate-800 rounded-full h-1 mt-1"><div class="bg-cyan-500 h-1 rounded-full" style="width:${(100*w.importance/mx).toFixed(0)}%"></div></div></div>`).join('');
+            } else {
+                whyHtml+=d.why.map(w=>{ const up=w.contribution>0; return `<div class="flex items-center justify-between py-1 border-b border-slate-800/60 text-xs"><span class="text-slate-300">${lbl(w)} <span class="text-slate-600 font-mono">${fmtVal(w.value)}</span></span><span class="font-mono ${up?'text-rose-400':'text-emerald-400'}">${up?'+':''}${w.contribution} ${up?t('d.increases'):t('d.decreases')}</span></div>`; }).join('');
+            }
+            $('panel-body').innerHTML = `
+                <div class="flex justify-between items-start mb-1"><h2 class="text-lg font-bold text-white font-mono">${head}</h2><button onclick="closePanel()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button></div>
+                <div class="mb-3">${badge}</div>
+                <div class="text-[11px] text-cyan-300/80 bg-cyan-900/20 border border-cyan-800/40 rounded p-2 mb-4"><i class="fa-solid fa-clock mr-1"></i>${when}</div>
+                <div class="mb-5"><div class="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-2 flex items-center gap-2"><i class="fa-solid fa-right-to-bracket"></i> ${t('d.input')}</div>${inHtml}</div>
+                <div class="mb-5"><div class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-2 flex items-center gap-2"><i class="fa-solid fa-right-from-bracket"></i> ${t('d.output')}</div>${outHtml}</div>
+                <div class="mb-2"><div class="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2 flex items-center gap-2"><i class="fa-solid fa-lightbulb"></i> ${t('d.why')}</div>${whyHtml}</div>`;
+        }
+
+        // ================= how it works =================
+        let MI=null;
+        function openHowItWorks(){ if(!MI) return; const en=lang==='en';
+            const items = en ? [
+                "The two models were trained offline in the analysis notebooks — no training happens here.",
+                "precompute.py scored the whole historical test period ONCE and stored the results (with each row's real input features, and per-prediction contributions for the node model).",
+                "The dashboard replays those stored predictions against a virtual clock — no model inference runs while the site is live.",
+                "Every prediction shown used only data available at or before its own prediction time (jobs: at submission; nodes: at the 15-minute slot).",
+                "Fields the dataset does not carry (VRAM, PCIe errors, MIG) are shown as N/A, never invented; utilisation is a labelled power proxy."
+            ] : [
+                "兩個模型皆於分析 notebook 中離線訓練完成 — 此處不進行任何訓練。",
+                "precompute.py 對整段歷史測試期評分「一次」，並儲存結果 (含每列真實輸入特徵；節點模型另存個別預測貢獻)。",
+                "儀表板以虛擬時鐘回放這些已儲存的預測 — 網站運行時不執行任何模型推論。",
+                "所有預測僅使用其預測時間點 (含) 之前可得的資料 (任務：提交時；節點：15 分鐘時槽)。",
+                "資料集未收集的欄位 (VRAM、PCIe 錯誤、MIG) 一律標示 N/A，絕不虛構；使用率為明確標示的功耗 proxy。"
+            ];
+            $('hiw-list').innerHTML = items.map(x=>`<li>${x}</li>`).join('');
+            $('hiw-method').textContent = MI.methodology || '';
+            $('hiw').classList.remove('hidden');
+        }
+        function closeHowItWorks(e){ if(e && e.target && e.target.closest && e.target.closest('#hiw > div') && e.type==='click' && e.target.id!=='hiw') { } $('hiw').classList.add('hidden'); }
+
+        // ================= refresh =================
+        async function refresh(){
+            try{
+                applyClock(await api('/api/clock'));
+                if(currentTab==='dashboard'){ renderSummary(await api('/api/summary')); renderLogs(await api('/api/logs?limit=40')); }
+                else if(currentTab==='nodes'){ renderNodesData(await api('/api/nodes?limit=120&sort='+($('node-sort').value||'risk'))); }
+                else if(currentTab==='jobs'){ const st=$('job-state').value; const d=await api('/api/jobs?limit=250&sort=risk'+(st?('&state='+st):'')); lastJobs=d.jobs; $('job-summary').innerHTML=`${t('job.showing')} ${d.count} ${t('job.rows')} · ${t('risk.threshold')} ${curThr}`; renderJobs(); }
+                refreshBrief();     // AIOps Agent box (throttled to ~12s real, so polling never hammers the report)
+            }catch(e){ console.error(e); }
+        }
+
+        // ================= policies =================
+        function onFilterInput(v){ $('pol-filter-val').textContent=v; $('pol-filter-watt').textContent=cutoffs[v]?'~'+Math.round(cutoffs[v]):'~'; }
+        async function loadPolicies(){
+            const d=await api('/api/policies'); cutoffs=d.node_filter_cutoffs_watts||{}; const p=d.policies;
+            $('pol-alert').value=p.alert_threshold; $('pol-alert-val').textContent=(+p.alert_threshold).toFixed(2);
+            $('pol-filter').value=p.node_filter_pct; onFilterInput(p.node_filter_pct);
+            $('pol-temp').value=p.temp_isolate_c; $('pol-checkpoint').value=p.checkpoint_min; $('pol-migrate').value=p.migrate_strategy;
+            $('pol-oom').checked=!!p.oom_guard_enabled; $('pol-nodeguard').checked=!!p.node_fail_guard_enabled;
+            curThr=p.alert_threshold;
+        }
+        async function savePolicies(){
+            const body={ alert_threshold:parseFloat($('pol-alert').value), node_filter_pct:parseFloat($('pol-filter').value), temp_isolate_c:parseFloat($('pol-temp').value), checkpoint_min:parseInt($('pol-checkpoint').value), migrate_strategy:$('pol-migrate').value, oom_guard_enabled:$('pol-oom').checked, node_fail_guard_enabled:$('pol-nodeguard').checked };
+            const d=await post('/api/policies',body); curThr=d.policies.alert_threshold;
+            const s=$('policy-status'); s.innerHTML=lang==='en'?'<i class="fa-solid fa-check text-emerald-400"></i> Applied — dashboard updates live':'<i class="fa-solid fa-check text-emerald-400"></i> 已套用，儀表板即時更新'; setTimeout(()=>{s.textContent='';},3000);
+            refresh(); refreshBrief(true);
+        }
+        async function loadModelInfo(){
+            MI=await api('/api/model_info'); const mi=MI, en=lang==='en';
+            $('mi-p3roc').textContent=mi.models[0].metrics.ROC_AUC; $('mi-p2roc').textContent=mi.models[1].metrics.ROC_AUC_full_population;
+            const m=mi.models.map(x=>{ const met=Object.entries(x.metrics).map(([k,v])=>`${k} <b class="text-slate-100">${v}</b>`).join(' · ');
+                return `<div class="bg-slate-900/40 rounded p-3 border border-slate-700/40"><div class="font-bold text-cyan-400">${x.id} — ${x.name}</div><div class="text-xs text-slate-400 mt-1">${x.algorithm} · ${x.n_features} features · ${x.prediction_time||''}</div><div class="text-xs text-slate-300 mt-1">${met}</div><div class="text-[11px] text-slate-500 mt-1">${x.task}</div>${x.notes?`<div class="text-[11px] text-amber-300/70 mt-1">⚠ ${x.notes}</div>`:''}</div>`; }).join('');
+            const na=mi.fields_not_in_dataset.map(f=>`<li><span class="na-tag">${f.field}</span> — ${f.reason}</li>`).join('');
+            const px=mi.proxied_fields.map(f=>`<li><b class="text-amber-300">${f.field}</b> — ${f.basis}</li>`).join('');
+            $('model-info-body').innerHTML = m
+              + `<div class="text-xs text-slate-400 pt-2"><b class="text-slate-200">${en?'Replay window:':'回放期間：'}</b> ${mi.replay_window.start} → ${mi.replay_window.end}</div>`
+              + `<div class="text-xs"><b class="text-slate-300">${en?'Fields not in this dataset (what data would we need):':'未收集之欄位 (需要什麼資料)：'}</b><ul class="list-disc ml-5 mt-1 space-y-0.5 text-slate-400">${na}</ul></div>`
+              + `<div class="text-xs"><b class="text-slate-300">${en?'Proxied fields:':'Proxy 代理欄位：'}</b><ul class="list-disc ml-5 mt-1 text-slate-400">${px}</ul></div>`
+              + `<div class="text-[11px] text-slate-500 pt-1">${mi.hardware_note}</div>`;
+        }
+
+        // ================= boot =================
+        (async function init(){
+            applyI18n();
+            try{ await loadPolicies(); await loadModelInfo(); }catch(e){ console.error(e); }
+            await refresh();
+            refreshBrief(true);
+            setInterval(refresh, 1500);
+        })();
+    </script>
+</body>
+</html>

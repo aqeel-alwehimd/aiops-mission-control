@@ -1,0 +1,14 @@
+# Serve-time dependencies only, pinned to the versions in use.
+#
+# The dashboard serves PRECOMPUTED predictions from SQLite and runs NO model inference at
+# request time, so the heavy modelling libraries are intentionally NOT listed here:
+#   duckdb, scikit-learn, lightgbm  -> used only by precompute.py (offline scoring) and never
+#                                      imported by the serving app (app.py/models.py/replay.py/report.py).
+#   anthropic                        -> optional; only imported if ANTHROPIC_API_KEY is set, for the
+#                                      LOCAL LLM-narrated report. The deployment runs template-only.
+# Excluding them keeps the free-tier build small and fast. See README "Deployment".
+fastapi==0.139.2
+uvicorn==0.51.0
+pandas==2.2.3
+numpy==2.2.4
+pydantic==2.13.4

@@ -1,0 +1,66 @@
+{
+  "models": [
+    {
+      "id": "P3",
+      "name": "Job-outcome model (SLURM)",
+      "algorithm": "HistGradientBoosting, multi-class -> binary (1 - P(COMPLETED))",
+      "task": "Predict at submission whether a job ends FAILED / TIMEOUT / OUT_OF_MEMORY vs COMPLETED",
+      "n_features": 23,
+      "operating_threshold": 0.3,
+      "metrics": {
+        "ROC_AUC": 0.871,
+        "PR_AUC": 0.726,
+        "precision@0.30": 0.592,
+        "recall@0.30": 0.709,
+        "F1@0.30": 0.646,
+        "base_rate": 0.222
+      },
+      "training_window": "job_table 22-09; chronological 70/30 split; train ends 2022-09-19",
+      "n_train": 79419,
+      "n_test": 34068,
+      "prediction_time": "at job submission -- uses only information available at submit_time",
+      "attribution": "global permutation importance (per-prediction attribution not cheaply available for HistGBT)",
+      "notes": "Excludes user 393 (broken auto-resubmit script, 45.8% of raw jobs). OOM is under-predicted: SLURM memory-request columns are null in this dump, so the model rarely fires the OOM class."
+    },
+    {
+      "id": "P2",
+      "name": "Node-anomaly model (IPMI)",
+      "algorithm": "LightGBM, 363 features, 30-minute horizon",
+      "task": "Predict a node monitoring-anomaly onset within 30 minutes from IPMI telemetry",
+      "n_features": 363,
+      "operating_mode": "low-power risk triage (score only the riskiest ~25% of slots)",
+      "metrics": {
+        "ROC_AUC_full_population": 0.848,
+        "ROC_AUC_risk_filtered_25pct": 0.929
+      },
+      "training_window": "aggregated IPMI, all 831 scored nodes; test period after 2022-04-06",
+      "prediction_time": "at each 15-minute telemetry slot -- uses only data up to that slot",
+      "attribution": "per-prediction LightGBM feature contributions (pred_contrib, log-odds space)",
+      "notes": "Low power = risk here: a node about to trip a monitoring anomaly is going idle/dropping out, not overheating. The triage keeps the lowest-power slots; recall is essentially unchanged."
+    }
+  ],
+  "methodology": "Models were trained offline in the analysis notebooks. precompute.py scored the historical test period ONCE and stored the results (with each row's real input features and, for the node model, its per-prediction feature contributions). The dashboard replays those stored predictions against a virtual clock -- no training or inference runs while the site is live, and every prediction shown used only data available at or before its own prediction time.",
+  "fields_not_in_dataset": [
+    {
+      "field": "VRAM usage",
+      "reason": "requires NVIDIA DCGM per-GPU memory telemetry; ExaData carries only IPMI + Ganglia"
+    },
+    {
+      "field": "PCIe error rate",
+      "reason": "requires DCGM/NVML XID + PCIe replay counters; not collected in ExaData"
+    },
+    {
+      "field": "MIG status",
+      "reason": "M100 GPUs are V100 (no MIG); MIG is an A100/H100 feature"
+    }
+  ],
+  "proxied_fields": [
+    {
+      "field": "Utilisation",
+      "basis": "derived from node total power draw vs a p99 6h-mean reference (1212 W)",
+      "reason": "no direct GPU-utilisation channel joined into the node model; power is a monotone proxy"
+    }
+  ],
+  "hardware_note": "Marconi100 nodes are IBM Power9 AC922 with 4x NVIDIA V100 (SXM2), NOT NVIDIA DGX. 'DCGM/DGX/MIG' labels in the mock UI are kept for layout but marked N/A where the data cannot fill them.",
+  "dataset": "CINECA Marconi100 ExaData (public HPC telemetry, ~980 nodes)"
+}

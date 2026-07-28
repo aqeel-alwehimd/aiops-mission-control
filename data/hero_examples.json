@@ -1,0 +1,59 @@
+{
+  "window_start_ts": 1664150400,
+  "window_end_ts": 1664409600,
+  "window_start_iso": "2022-09-26 00:00:00Z",
+  "window_end_iso": "2022-09-29 00:00:00Z",
+  "note": "Virtual timestamps to jump to for a guided tour. All rows are real precomputed predictions on the Sept-2022 test period.",
+  "examples": [
+    {
+      "kind": "job_timeout_caught",
+      "id": 508960,
+      "entity": "job 508960",
+      "user": "user_1544",
+      "risk_pct": 99.7,
+      "state": "TIMEOUT",
+      "pred_type": "TIMEOUT",
+      "jump_ts": 1664212804,
+      "jump_iso": "2022-09-26 17:20:04Z",
+      "title_en": "High-risk job caught: 508960 predicted TIMEOUT at 100% — then timed out.",
+      "title_zh": "高風險任務命中：508960 於提交時預測 TIMEOUT（100%），最終逾時。",
+      "open": {
+        "tab": "jobs",
+        "job_id": 508960
+      }
+    },
+    {
+      "kind": "node_flagged_before_onset",
+      "id": 38,
+      "entity": "node0038",
+      "rack": 1,
+      "risk_pct": 61.5,
+      "onset_ts": 1664216100,
+      "onset_iso": "2022-09-26 18:15:00Z",
+      "jump_ts": 1664215200,
+      "jump_iso": "2022-09-26 18:00:00Z",
+      "title_en": "Node flagged before failure: node0038 scored 61% ~15 min before its real onset at 2022-09-26 18:15:00Z.",
+      "title_zh": "節點提前預警：node0038 於真實 onset（2022-09-26 18:15:00Z）前約 15 分鐘即被評為 61%。",
+      "open": {
+        "tab": "nodes",
+        "node_id": 38
+      }
+    },
+    {
+      "kind": "job_missed",
+      "id": 4739803,
+      "entity": "job 4739803",
+      "user": "user_692",
+      "risk_pct": 19.3,
+      "state": "TIMEOUT",
+      "jump_ts": 1664407092,
+      "jump_iso": "2022-09-28 23:18:12Z",
+      "title_en": "An honest miss: job 4739803 ended TIMEOUT but P3 scored it only 19.3% — below the 30% alert threshold.",
+      "title_zh": "誠實的漏報：任務 4739803 最終 TIMEOUT，但 P3 僅評 19.3%，低於 30% 告警門檻。",
+      "open": {
+        "tab": "jobs",
+        "job_id": 4739803
+      }
+    }
+  ]
+}

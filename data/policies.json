@@ -1,0 +1,9 @@
+{
+  "alert_threshold": 0.3,
+  "node_filter_pct": 25.0,
+  "temp_isolate_c": 92.0,
+  "checkpoint_min": 15,
+  "migrate_strategy": "auto_healthy_node",
+  "oom_guard_enabled": true,
+  "node_fail_guard_enabled": true
+}
