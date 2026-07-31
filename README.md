@@ -210,10 +210,77 @@ box, refreshed as the clock advances, throttled to ~12 s and cached) and `full` 
 panel, with **copy to clipboard**, **download as `.md`**, and a collapsible **raw facts JSON** so
 the evidence behind the prose is one click away).
 
+### Agent reply shapes, and the platform-side instructions you must also update
+
+The LaplaceAI agent is configured **platform-side** with its own system instructions. Two things
+follow, and the second one is easy to lose an afternoon to:
+
+* **Both reply shapes are handled here.** If the agent is configured with a *JSON contract* it
+  returns an object such as `{"executive_summary": "...", "risk_assessment": "..."}`. `report.py`
+  parses that and composes the markdown itself (`compose_narration()` → `compose_markdown()`), so
+  presentation stays under Python's control: each key becomes a section heading (`executive_summary`
+  → “Executive summary”; unknown keys are title-cased and appended rather than dropped), and list
+  values become bullets. A plain-markdown reply is passed through unchanged. For `length="brief"`
+  the result is flattened to **one plain-text paragraph with no markdown**, because the sidebar
+  element is written with `textContent` and would otherwise show the syntax literally.
+* **A reply that is not report content is rejected.** `_meta_commentary_reason()` applies a small,
+  deliberately conservative set of signals — self-referential preamble (“I have generated…”,
+  「我已…」), any mention of producing/attaching/downloading a **file**, a response in the wrong
+  language for the request, or a near-empty reply. On rejection the deterministic template is served
+  with `mode = "template_llm_rejected"` and a `fallback_reason` naming the cause. The numeric
+  guardrail then runs on the **composed** text, so validation is never bypassed by this step.
+
+### Endpoint resilience, and the pre-demo prewarm
+
+A LaplaceAI **504** is a gateway timeout on *their* side — the agent exceeded its internal limit, so
+raising the client timeout cannot help. Three things absorb it:
+
+* **Retries.** Transient failures (502/503/504/408/429/500, read timeout, connection error) are
+  retried up to **3 attempts** with exponential backoff plus jitter, bounded by a hard
+  **150-second** total ceiling so a report request can never hang indefinitely. Auth (401/403) and
+  malformed-request (other 4xx) failures are **not** retried — they are configuration errors.
+* **Error-class-aware cooldown**, replacing the old flat 120 s breaker: **25 s** after transient
+  failures (short enough that you are not stuck in template mode), **15 min** for auth, **10 min**
+  for malformed requests. While cooling down, `fallback_reason` says so explicitly with the cause
+  and the remaining seconds — `endpoint cooling down after HTTP 504 (18s remaining)` — so it is
+  never mistaken for a missing key or a numeric rejection.
+* **A trimmed prompt payload.** The agent receives a narration-sized view of the facts (example
+  arrays capped at 2, list sections at 4, epoch duplicates and the other language's caveat dropped):
+  **3,726 → 2,740 characters, 26 % smaller**, and 17 % off the whole prompt. The **full** facts are
+  still used for the numeric guardrail and the raw-facts panel, so a report quoting something that
+  was trimmed out of the prompt still validates.
+
+**Before a demo, prewarm the cache** so the demo path never depends on a live call:
+
+```bash
+python prewarm_reports.py            # live: walks the hero timestamps + a spread, both languages,
+                                     # both lengths, and writes data/report_cache.json
+python prewarm_reports.py --mock     # same path with the agent stubbed (no network) - for a smoke test
+python prewarm_reports.py --clear    # drop the prewarm cache
+```
+
+Only `mode == "llm"` results are written, so a prewarmed entry is by construction one that passed the
+hard gate. The in-memory cache lives in one process, so the prewarm file is what makes a *separately
+run* script useful to the server: on a cache miss the app reads `data/report_cache.json`, and those
+entries ignore the short TTL. Every filesystem operation degrades silently, so a read-only deployment
+behaves exactly as before. A mock run of 7 timestamps × 4 combinations produced 28 entries in 5.7 s;
+a live run costs roughly the agent's own latency (~1 min) per entry.
+
+> **⚠️ The prompt alone cannot override the agent's platform-side system instructions.** `report.py`
+> now states the language requirement twice (top and end of the prompt) and forbids preamble,
+> self-introduction, file/download/attachment references and non-string values — but if the agent is
+> configured on the LaplaceAI platform to emit a download card, to answer in a fixed language, or to
+> wrap replies in commentary, **it will keep doing so and the reply will be rejected here**. Update
+> the agent's own system instructions to match: return report content only, in the language named in
+> the request, with string values only and no file references.
+
 **Key handling & safety.** The Anthropic key is read only from `ANTHROPIC_API_KEY`, server-side,
 never hardcoded or sent to the client. If the SDK is not installed or the key is absent, the code
 skips straight to the template without erroring. LLM calls use `max_retries=0`, a 15 s timeout, and
-a 2-minute circuit breaker, so a missing/broken endpoint never hangs the polled report. Reports are
+a 2-minute circuit breaker, so a missing/broken endpoint never hangs the polled report. **Only
+successful (`mode == "llm"`) reports are cached** — a fallback is a transient condition, so pinning
+one for the TTL would keep serving a bad report after the cause was fixed; fallbacks are retried on
+the next request, and `GET /api/report?nocache=1` forces a fresh generation. Successful reports are
 cached by (virtual-time bucket, window, language, length, thresholds) with a short TTL, so repeated
 polling does not trigger repeated API calls.
 

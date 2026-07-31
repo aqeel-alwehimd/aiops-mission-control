@@ -15,7 +15,7 @@
     </script>
     <style>
         body { background-color:#050B14; background-image: radial-gradient(circle at 15% 50%, rgba(6,182,212,0.08), transparent 25%), radial-gradient(circle at 85% 30%, rgba(244,63,94,0.05), transparent 25%); background-attachment:fixed; color:#e2e8f0; overflow-x:hidden; }
-        .scanlines { position:fixed; top:0; left:0; width:100vw; height:100vh; background:linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.1) 50%, rgba(0,0,0,0.1)); background-size:100% 4px; pointer-events:none; z-index:50; opacity:0.3; }
+        .scanlines { position:fixed; top:0; left:0; width:100vw; height:100vh; background:linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.1) 50%, rgba(0,0,0,0.1)); background-size:100% 4px; pointer-events:none; z-index:30; opacity:0.3; }   /* below the z-40 modals: it must never veil the report */
         .glass-panel { background:var(--color-panel); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border:1px solid var(--color-panelborder); box-shadow:0 4px 6px -1px rgba(0,0,0,0.5), 0 0 20px rgba(6,182,212,0.05); border-radius:0.75rem; position:relative; overflow:hidden; }
         .glass-panel::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg, transparent, rgba(34,211,238,0.5), transparent); }
         .glow-text-cyan { text-shadow:0 0 10px rgba(34,211,238,0.7); }
@@ -66,7 +66,7 @@
             <button id="lang-toggle" onclick="toggleLang()" class="text-xs font-bold text-cyan-400 border border-cyan-500/50 rounded px-2 py-1.5 hover:bg-cyan-500/20">EN / 中文</button>
 
             <div class="flex items-center gap-2 bg-slate-800/60 px-3 py-1.5 rounded-lg border border-slate-700">
-                <button id="btn-play" onclick="clockCmd('play')" title="Play / Pause" class="w-8 h-8 rounded bg-cyan-500/20 border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/40"><i id="play-icon" class="fa-solid fa-play"></i></button>
+                <button id="btn-play" onclick="togglePlay()" title="Play / Pause" aria-label="Play / Pause" class="w-8 h-8 rounded bg-cyan-500/20 border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/40"><i id="play-icon" class="fa-solid fa-play"></i></button>
                 <button onclick="clockCmd('step',900)" title="Step +15 min" class="w-8 h-8 rounded bg-slate-700/50 border border-slate-600 text-slate-300 hover:text-white"><i class="fa-solid fa-forward-step"></i></button>
                 <button onclick="clockCmd('reset')" title="Reset" class="w-8 h-8 rounded bg-slate-700/50 border border-slate-600 text-slate-300 hover:text-white"><i class="fa-solid fa-rotate-left"></i></button>
                 <select id="sel-speed" onchange="clockCmd('speed',parseFloat(this.value))" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-cyan-500">
@@ -106,7 +106,9 @@
                         <div class="flex items-center gap-2 text-cyan-400"><i class="fa-solid fa-robot"></i><span class="font-bold">AIOps Agent</span></div>
                         <span id="agent-mode" class="text-[9px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400"></span>
                     </div>
-                    <p class="text-slate-300 leading-relaxed" id="agent-status">…</p>
+                    <!-- bounded + own scroll: this is set with textContent from the brief report, whose
+                         length is not under our control, and the sidebar has no room to grow -->
+                    <p class="text-slate-300 leading-relaxed max-h-40 overflow-y-auto overscroll-contain detail-scroll pr-1" id="agent-status">…</p>
                     <button onclick="openReport()" class="mt-3 w-full text-[11px] bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 rounded px-2 py-1.5 flex items-center justify-center gap-1"><i class="fa-solid fa-file-lines"></i> <span data-i18n="report.generate">產生交接報告</span></button>
                 </div>
                 <div class="mt-3 text-[10px] text-slate-500 leading-relaxed">
@@ -290,26 +292,32 @@
 
     <!-- Drill-down side panel -->
     <div id="overlay" class="fixed inset-0 bg-black/60 z-40 hidden" onclick="closePanel()"></div>
-    <aside id="panel" class="fixed top-0 right-0 h-full w-[500px] max-w-full glass-panel rounded-none border-l border-cyan-500/30 z-40 overflow-y-auto detail-scroll">
+    <aside id="panel" class="fixed top-0 right-0 h-full w-[500px] max-w-full glass-panel rounded-none border-l border-cyan-500/30 z-40 overflow-y-auto overscroll-contain detail-scroll">
         <div id="panel-body" class="p-6"></div>
     </aside>
 
     <!-- How-it-works modal -->
     <div id="hiw" class="fixed inset-0 bg-black/70 z-40 hidden flex items-center justify-center p-6" onclick="closeHowItWorks(event)">
-        <div class="glass-panel max-w-2xl w-full p-8" onclick="event.stopPropagation()">
-            <div class="flex justify-between items-start mb-4">
+        <!-- Same treatment as the report modal: this box had no height cap, so on a short viewport
+             .glass-panel's overflow:hidden clipped it top AND bottom with nothing able to scroll. -->
+        <div class="glass-panel max-w-2xl w-full max-h-[85vh] min-h-0 flex flex-col" onclick="event.stopPropagation()">
+            <div class="flex justify-between items-start px-8 pt-8 pb-4 shrink-0">
                 <h2 class="text-xl font-tech font-bold text-white" data-i18n="hiw.title">運作原理 (How this works)</h2>
                 <button onclick="closeHowItWorks()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
             </div>
-            <ul id="hiw-list" class="space-y-3 text-sm text-slate-300 list-disc ml-5"></ul>
-            <p id="hiw-method" class="text-xs text-slate-500 mt-4 pt-4 border-t border-slate-700/50"></p>
+            <div class="flex-1 min-h-0 overflow-y-auto overscroll-contain detail-scroll px-8 pb-8">
+                <ul id="hiw-list" class="space-y-3 text-sm text-slate-300 list-disc ml-5"></ul>
+                <p id="hiw-method" class="text-xs text-slate-500 mt-4 pt-4 border-t border-slate-700/50"></p>
+            </div>
         </div>
     </div>
 
     <!-- Shift-report modal -->
     <div id="report-modal" class="fixed inset-0 bg-black/70 z-40 hidden flex items-center justify-center p-6" onclick="if(event.target===this)closeReport()">
-        <div class="glass-panel w-full max-w-3xl max-h-[88vh] flex flex-col">
-            <div class="px-6 py-4 border-b border-slate-700/50 flex items-center justify-between gap-3">
+        <!-- max-h caps the box; the BODY below carries min-h-0 so it may shrink below its content
+             (a flex child's automatic minimum size is otherwise its content size) and scroll instead. -->
+        <div class="glass-panel w-full max-w-3xl max-h-[85vh] min-h-0 flex flex-col">
+            <div class="px-6 py-4 border-b border-slate-700/50 flex items-center justify-between gap-3 flex-wrap shrink-0">
                 <div class="flex items-center gap-3 min-w-0">
                     <h2 class="text-lg font-bold text-white whitespace-nowrap" data-i18n="report.title">交接報告</h2>
                     <span id="report-mode" class="text-[10px] px-2 py-0.5 rounded border whitespace-nowrap"></span>
@@ -324,12 +332,19 @@
                     <button onclick="closeReport()" class="text-slate-400 hover:text-white ml-1"><i class="fa-solid fa-xmark text-lg"></i></button>
                 </div>
             </div>
-            <div class="px-6 py-2 text-[11px] text-slate-500 border-b border-slate-800/60"><span data-i18n="report.generatedAt">產生於 (虛擬時間)</span>: <span id="report-genat" class="font-mono">—</span></div>
-            <div class="flex-1 overflow-y-auto detail-scroll px-6 py-4">
+            <div class="px-6 py-2 text-[11px] text-slate-500 border-b border-slate-800/60 shrink-0"><span data-i18n="report.generatedAt">產生於 (虛擬時間)</span>: <span id="report-genat" class="font-mono">—</span><span id="report-why" class="text-amber-400/80 hidden"></span></div>
+            <div id="report-scroll" class="flex-1 min-h-0 overflow-y-auto overscroll-contain detail-scroll px-6 py-4">
                 <div id="report-body" class="text-sm text-slate-200 leading-relaxed report-md"></div>
                 <details class="mt-6 border-t border-slate-700/50 pt-3">
                     <summary class="cursor-pointer text-xs text-cyan-400" data-i18n="report.rawfacts">原始事實 (JSON — 報告的依據)</summary>
-                    <pre id="report-facts" class="mt-2 text-[10px] text-slate-400 bg-slate-900/60 rounded p-3 overflow-x-auto detail-scroll" style="max-height:40vh"></pre>
+                    <pre id="report-facts" class="mt-2 text-[10px] text-slate-400 bg-slate-900/60 rounded p-3 max-h-[40vh] overflow-auto overscroll-contain detail-scroll"></pre>
+                </details>
+                <!-- the draft the hard gate rejected: kept so a false positive is diagnosable here
+                     rather than by round-tripping. Hidden unless there is one. -->
+                <details id="report-draft-wrap" class="mt-3 border-t border-slate-700/50 pt-3 hidden">
+                    <summary class="cursor-pointer text-xs text-amber-400" data-i18n="report.draft">遭退回的草稿 (AI 原文)</summary>
+                    <div id="report-draft-meta" class="mt-2 text-[10px] text-amber-300/80"></div>
+                    <pre id="report-draft" class="mt-1 text-[10px] text-slate-400 bg-slate-900/60 rounded p-3 max-h-[40vh] overflow-auto overscroll-contain detail-scroll whitespace-pre-wrap"></pre>
                 </details>
             </div>
         </div>
@@ -362,7 +377,7 @@
             "d.why.global":"全域重要性 (跨所有任務，非此列的個別歸因)","d.why.per":"個別預測歸因 (此時槽的 LightGBM 貢獻，log-odds)","d.importance":"重要性","d.thisval":"此列數值","d.contrib":"貢獻","d.increases":"↑ 提高風險","d.decreases":"↓ 降低風險",
             "d.risk":"風險分數","d.predclass":"預測類別","d.threshold":"操作門檻","d.flagged":"已標記","d.notflagged":"未標記","d.inscope":"評分中 (在分流範圍內)","d.outscope":"分流略過 (低功耗指標判為低風險)","d.close":"關閉","d.probs":"各類別機率",
             "empty.jobs":"此時間點暫無任務","empty.nodes":"此時間點暫無節點資料","empty.logs":"此時間點暫無事件","node.triaged":"分流略過 (低風險)","job.ended":"已結束","risk.low":"低風險","risk.threshold":"門檻","node.showing":"顯示","node.of":"/","node.scoring":"評分中","node.band":"低功耗帶","node.anom":"異常","node.warn":"警示","job.showing":"顯示","job.rows":"筆 (在險/最近結束)",
-            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":"下載 .md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板"
+            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":"下載 .md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板","report.why":"回退原因","report.advisory":"提醒","report.draft":"遭退回的草稿 (AI 原文)"
           },
           en: {
             "app.subtitle":"Marconi100 ExaData · real-model replay","howitworks.btn":"How it works",
@@ -388,7 +403,7 @@
             "d.why.global":"Global importance (across all jobs — NOT this row's per-prediction attribution)","d.why.per":"Per-prediction attribution (this slot's LightGBM contributions, log-odds)","d.importance":"importance","d.thisval":"this row","d.contrib":"contribution","d.increases":"↑ raises risk","d.decreases":"↓ lowers risk",
             "d.risk":"Risk score","d.predclass":"Predicted class","d.threshold":"Operating threshold","d.flagged":"Flagged","d.notflagged":"Not flagged","d.inscope":"Scored (in triage scope)","d.outscope":"Triaged out (cheap power indicator judged it low-risk)","d.close":"Close","d.probs":"Class probabilities",
             "empty.jobs":"No jobs at this time","empty.nodes":"No node data at this time","empty.logs":"No events at this time","node.triaged":"Triaged (low-risk)","job.ended":"Ended","risk.low":"Low","risk.threshold":"threshold","node.showing":"Showing","node.of":"of","node.scoring":"scoring","node.band":"low-power band","node.anom":"anomalous","node.warn":"at-risk","job.showing":"Showing","job.rows":"rows (active / recently ended)",
-            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":"Download .md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl"
+            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":"Download .md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl","report.why":"Fallback reason","report.advisory":"Advisory","report.draft":"Rejected draft (agent's own text)"
           }
         };
         let lang = localStorage.getItem('lang') || 'zh';
@@ -409,6 +424,7 @@
 
         // ================= state =================
         let currentTab='dashboard', scrubbing=false, lastJobs=[], cutoffs={}, curThr=0.30, lastDetail=null;
+        let clockPaused=false;      // mirrors the SERVER's paused flag; refreshed by applyClock() on every poll
         let reportData=null, briefAt=0;
         const $ = id => document.getElementById(id);
         async function api(p,o){ const r=await fetch(p,o); if(!r.ok) throw new Error(p+' '+r.status); return r.json(); }
@@ -419,10 +435,16 @@
         // ================= clock =================
         async function clockCmd(a,v){ try{ applyClock(await post('/api/clock',{action:a,value:v})); refresh(); }catch(e){console.error(e);} }
         function doScrub(v){ scrubbing=false; clockCmd('jump_frac', v/1000); }
+        // The single play/pause control must send the command that matches the SERVER's current state.
+        // (It used to be hardwired to 'play', so pausing was impossible however often you clicked it.)
+        function togglePlay(){ clockCmd(clockPaused ? 'play' : 'pause'); }
         function applyClock(st){
+            clockPaused = !!st.paused;          // authoritative: comes from GET/POST /api/clock, never assumed
             $('vclock').textContent = new Date(st.virtual_ts*1000).toISOString().substr(11,8);
             $('vdate').textContent = st.virtual_iso.substr(0,10);
             $('play-icon').className = st.paused?'fa-solid fa-play':'fa-solid fa-pause';
+            const bp=$('btn-play'), lbl=st.paused?(lang==='en'?'Play':'播放'):(lang==='en'?'Pause':'暫停');
+            bp.title=lbl; bp.setAttribute('aria-label',lbl); bp.setAttribute('aria-pressed', String(!!st.paused));
             $('replay-status').textContent = st.paused?'PAUSED':'PLAYING';
             $('replay-status').className = 'font-mono text-xs '+(st.paused?'text-amber-400':'text-emerald-400');
             $('live-dot').className='relative inline-flex rounded-full h-3 w-3 '+(st.paused?'bg-amber-500':'bg-emerald-500');
@@ -462,17 +484,21 @@
             }
             close(); return html;
         }
-        function modeBadge(el, mode, full){
+        // `why` = the API's fallback_reason: hovering the badge tells you WHY you got a template
+        // instead of the agent's narration, without opening a terminal.
+        function modeBadge(el, mode, full, why){
             let key='report.mode.template', cls='border-slate-600 text-slate-400';
             if(mode==='llm'){ key= full?'report.mode.llm':'report.mode.short.llm'; cls='border-emerald-500/40 text-emerald-400'; }
             else if(mode==='template_llm_rejected'){ key='report.mode.rejected'; cls='border-amber-500/40 text-amber-400'; }
             else { key= full?'report.mode.template':'report.mode.short.template'; }
             el.textContent = t(key); el.className = el.className.replace(/border-\S+|text-\S+/g,'').trim()+' '+cls;
+            if(why){ el.title = t('report.why')+': '+why; el.style.cursor='help'; }
+            else   { el.title = ''; el.style.cursor=''; }
         }
         async function refreshBrief(force){
             const now=Date.now(); if(!force && now-briefAt<12000) return; briefAt=now;
             try{ const d=await api('/api/report?length=brief&window=6&lang='+lang);
-                $('agent-status').textContent=d.text; modeBadge($('agent-mode'), d.mode, false);
+                $('agent-status').textContent=d.text; modeBadge($('agent-mode'), d.mode, false, d.fallback_reason);
             }catch(e){ /* leave last text */ }
         }
         async function openReport(regen){
@@ -490,7 +516,24 @@
             document.getElementById('report-facts').textContent=JSON.stringify(d.facts,null,2);
             document.getElementById('report-genat').textContent=d.generated_iso+(d.cached?' (cached)':'');
             const b=document.getElementById('report-mode'); b.className='text-[10px] px-2 py-0.5 rounded border whitespace-nowrap';
-            modeBadge(b, d.mode, true);
+            modeBadge(b, d.mode, true, d.fallback_reason);
+            // and spell it out in the strip under the header, so the cause is visible without hovering
+            const fr=document.getElementById('report-why');
+            const bits=[];
+            if(d.fallback_reason) bits.push(t('report.why')+': '+d.fallback_reason);
+            // advisories are NON-BLOCKING quality flags: the report above is still the real one
+            (d.advisories||[]).forEach(a=>bits.push(t('report.advisory')+': '+a.message));
+            if(bits.length){ fr.textContent=' · '+bits.join(' · '); fr.classList.remove('hidden'); }
+            else { fr.textContent=''; fr.classList.add('hidden'); }
+            // the rejected draft, beside the raw-facts panel
+            const dw=document.getElementById('report-draft-wrap'), rd=d.rejected_draft;
+            if(rd && rd.text){
+                document.getElementById('report-draft').textContent=rd.text;
+                document.getElementById('report-draft-meta').textContent =
+                    (rd.field?('field: '+rd.field+'  ·  '):'')
+                    + ((rd.unverified&&rd.unverified.length)?('unmatched: '+rd.unverified.join(', ')):(rd.reason||''));
+                dw.classList.remove('hidden');
+            } else { dw.classList.add('hidden'); }
         }
         function closeReport(){ document.getElementById('report-modal').classList.add('hidden'); }
         async function copyReport(){

@@ -19,6 +19,8 @@ from pydantic import BaseModel
 from models import Store
 from replay import VirtualClock
 from report import build_report
+from dotenv import load_dotenv
+load_dotenv()  # Loads variables from .env into os.environ
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -86,16 +88,19 @@ def api_model_info():
 # ============================================================ OPERATIONS REPORT
 @app.get("/api/report")
 def api_report(window: float = Query(6, ge=0.25, le=48),
-               lang: str = "zh", length: str = "brief"):
+               lang: str = "zh", length: str = "brief", nocache: bool = False):
     """Auto-generated operations report at the current virtual time.
 
     Facts are computed in Python from the store; the LLM only narrates them (constrained to those
-    values and numerically validated); if no ANTHROPIC_API_KEY / SDK, a deterministic template is
-    used instead. Returns both the generated `text` and the underlying `facts` JSON.
-    Params: window (lookback hours), lang (en|zh), length (brief|full)."""
+    values and numerically validated); if the agent endpoint is unavailable or its narration fails
+    the numeric check, a deterministic template is used instead and `fallback_reason` says why.
+    Only successful (`mode == "llm"`) reports are cached, so a fallback is retried on the next
+    request rather than pinned for the cache TTL. `nocache=1` forces a fresh generation.
+    Params: window (lookback hours), lang (en|zh), length (brief|full), nocache (0|1)."""
     lang = "en" if lang == "en" else "zh"
     length = "full" if length == "full" else "brief"
-    return build_report(store, clock, policies, window_h=window, lang=lang, length=length)
+    return build_report(store, clock, policies, window_h=window, lang=lang, length=length,
+                        nocache=nocache)
 
 
 # ============================================================ DRILL-DOWN (input / output / why)
