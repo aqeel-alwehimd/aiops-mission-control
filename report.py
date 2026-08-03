@@ -15,9 +15,13 @@ LLM call happens server-side.
 """
 import os, re, json, time, random, threading, datetime, requests
 
+import charts as chartreg
+from charts import ChartId
+
 # ---------------- tunables ----------------
 NODE_WATCH   = 0.30                                   # in-scope P2 score >= this = "on watch"
 MAX_EX       = 4                                      # example IDs per outcome bucket
+MAX_CHARTS   = 4                                      # cap on how many charts the AGENT may select
 REPORT_MODEL = os.environ.get("REPORT_MODEL", "claude-haiku-4-5-20251001")
 CACHE_TTL    = 120                                    # real seconds an entry stays valid
 CACHE_BUCKET = 900                                    # virtual seconds per cache bucket (15 virtual min)
@@ -26,8 +30,46 @@ CACHE_MAX    = 256
 def _iso(ts): return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).strftime("%Y-%m-%d %H:%M") + "Z"
 def _hm(ts):  return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).strftime("%m-%d %H:%M")
 
+def _job_concentration(jobs: list) -> dict:
+    """How many distinct users own the high-risk job list, and the largest single share.
+
+    A ranking of six jobs that all belong to one user, all at the same risk, is not a ranking -- it
+    is one user's batch. That is the fact worth narrating, so it is computed here rather than left
+    for a reader to infer from six near-identical bars.
+    """
+    users = [str(j.get("user")) for j in (jobs or []) if isinstance(j, dict) and j.get("user")]
+    if not users:
+        return {"jobs": 0, "distinct_users": 0, "top_user": None,
+                "top_user_jobs": 0, "top_user_share_pct": None}
+    counts = {}
+    for u in users:
+        counts[u] = counts.get(u, 0) + 1
+    top_user, top_n = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    return {"jobs": len(users), "distinct_users": len(counts), "top_user": top_user,
+            "top_user_jobs": top_n, "top_user_share_pct": round(100.0 * top_n / len(users), 1)}
+
 
 # ============================================================ 1. FACTS (pure Python)
+#
+# COHORTS -- read this before touching any count below.
+#
+# Two different questions live in this window, and they have different answers because they select
+# different jobs. Conflating them is what produced the inconsistency this section now prevents:
+# a report that said 612 jobs flagged / 406 correctly warned / 100 false alarms, where 406+100=506.
+#
+#   cohort S ("submitted")  jobs whose SUBMIT time falls in the window. This is the cohort P3 was
+#                           asked to judge during this shift, and it is the ONLY cohort the
+#                           prediction-outcome scoring uses. Some of its jobs have not ended yet at
+#                           the virtual time t, so they have no outcome: they are pending, and they
+#                           are counted explicitly rather than silently dropped.
+#   cohort E ("ended")      jobs whose END time falls in the window, whenever they were submitted.
+#                           This answers "what finished on my shift" and drives the volume counts
+#                           and the job-outcome mix.
+#
+# Neither cohort contains the other. A long job submitted before the window and ended inside it is
+# in E but not S; a job submitted inside the window and still running at t is in S but not E.
+# Key names carry the cohort ("flagged_at_submission", "ended_in_window_*") so a reader can never
+# mistake one for the other.
 def assemble_facts(store, t: int, policies: dict, window_h: float = 6) -> dict:
     import pandas as pd
     thr = float(policies["alert_threshold"]); pct = float(policies["node_filter_pct"])
@@ -35,25 +77,48 @@ def assemble_facts(store, t: int, policies: dict, window_h: float = 6) -> dict:
     cutoff = store.node_cutoff_watts(pct)
     summ = store.summary(t, policies)
 
-    submitted = store._scalar("SELECT COUNT(*) FROM jobs WHERE submit_ts>? AND submit_ts<=?", (lo, t))
-    flagged   = store._scalar("SELECT COUNT(*) FROM jobs WHERE submit_ts>? AND submit_ts<=? AND risk>=?", (lo, t, thr))
+    def exlist(df):
+        df = df.sort_values("risk", ascending=False).head(MAX_EX)
+        return [{"job_id": int(r.job_id), "user": f"user_{int(r.user_id)}", "state": str(r.state),
+                 "risk_pct": round(float(r.risk) * 100, 1)} for r in df.itertuples(index=False)]
+
+    def exlist_inflight(df):
+        """Examples for jobs that have NOT ended at t. Their `state` column holds the eventual SLURM
+        outcome, which is a FUTURE fact at the virtual time -- publishing it would let the narration
+        announce how a still-running job turns out. Only the observable status is emitted."""
+        df = df.sort_values("risk", ascending=False).head(MAX_EX)
+        return [{"job_id": int(r.job_id), "user": f"user_{int(r.user_id)}",
+                 "status": ("RUNNING" if int(r.start_ts) <= t else "PENDING"),
+                 "risk_pct": round(float(r.risk) * 100, 1)} for r in df.itertuples(index=False)]
+
+    # ---- cohort S: submitted in the window. Everything scored below comes from this frame. -------
+    sub = store._df("SELECT job_id,user_id,state,risk,pred_type,submit_ts,start_ts,end_ts "
+                    "FROM jobs WHERE submit_ts>? AND submit_ts<=?", (lo, t))
+    submitted = len(sub)
+    resolved_mask = (sub.end_ts <= t) if submitted else sub          # outcome known at the virtual time
+    sub_done  = sub[resolved_mask] if submitted else sub
+    flagged_df = sub[sub.risk >= thr] if submitted else sub
+    flagged = len(flagged_df)
+
+    # the flagged cohort partitioned by outcome -- these three are mutually exclusive and, by
+    # construction, exhaustive: correct + false_alarm + pending == flagged, always.
+    fl_done = flagged_df[flagged_df.end_ts <= t] if flagged else flagged_df
+    correct = fl_done[fl_done.state != "COMPLETED"] if len(fl_done) else fl_done
+    falarms = fl_done[fl_done.state == "COMPLETED"] if len(fl_done) else fl_done
+    pending = flagged_df[flagged_df.end_ts > t] if flagged else flagged_df
+    # misses live in the same cohort but outside the flagged set: it failed and P3 did not warn.
+    misses  = sub_done[(sub_done.state != "COMPLETED") & (sub_done.risk < thr)] if len(sub_done) else sub_done
+
+    nfail = len(correct) + len(misses)               # failures from cohort S that have ENDED by t
+    catch = round(100 * len(correct) / nfail, 1) if nfail else None
+
+    # ---- cohort E: ended in the window, whenever submitted. Volume only -- never scored. ---------
     ended = store._df("SELECT job_id,user_id,state,risk,pred_type,end_ts FROM jobs WHERE end_ts>? AND end_ts<=?", (lo, t))
     n = len(ended)
     ef = int((ended.state == "FAILED").sum()) if n else 0
     et = int((ended.state == "TIMEOUT").sum()) if n else 0
     eo = int((ended.state == "OUT_OF_MEMORY").sum()) if n else 0
     ecp = int((ended.state == "COMPLETED").sum()) if n else 0
-    failed_all = ended[ended.state != "COMPLETED"] if n else ended
-
-    def exlist(df):
-        df = df.sort_values("risk", ascending=False).head(MAX_EX)
-        return [{"job_id": int(r.job_id), "user": f"user_{int(r.user_id)}", "state": str(r.state),
-                 "risk_pct": round(float(r.risk) * 100, 1)} for r in df.itertuples(index=False)]
-    correct = failed_all[failed_all.risk >= thr] if len(failed_all) else failed_all
-    misses  = failed_all[failed_all.risk <  thr] if len(failed_all) else failed_all
-    falarms = ended[(ended.state == "COMPLETED") & (ended.risk >= thr)] if n else ended
-    nfail = len(failed_all)
-    catch = round(100 * len(correct) / nfail, 1) if nfail else None
 
     ons = store._df("SELECT node,rack,ts,kind FROM node_events WHERE ts>? AND ts<=? ORDER BY ts", (lo, t))
     onset_events = [{"node": int(r.node), "rack": int(r.rack), "time": _hm(int(r.ts)), "kind": str(r.kind)}
@@ -92,17 +157,45 @@ def assemble_facts(store, t: int, policies: dict, window_h: float = 6) -> dict:
                       "nodes_total": summ["nodes_total"], "nodes_anomalous": summ["nodes_anomalous"],
                       "nodes_at_risk": summ["nodes_at_risk"], "nodes_scored": summ["nodes_scored"],
                       "utilisation_pct": summ["utilisation_pct"]},
-      "jobs_window": {"submitted": int(submitted), "flagged": int(flagged), "ended": n,
-                      "ended_failed": ef, "ended_timeout": et, "ended_oom": eo, "ended_completed": ecp},
+      "jobs_window": {
+         # cohort S -- submitted inside the window (the cohort P3 was asked to judge)
+         "submitted": int(submitted),
+         "flagged_at_submission": int(flagged),
+         "submitted_outcome_known": int(len(sub_done)),
+         "submitted_still_running": int(submitted - len(sub_done)),
+         # cohort E -- ended inside the window, whenever they were submitted (volume only)
+         "ended_in_window": n,
+         "ended_in_window_failed": ef, "ended_in_window_timeout": et,
+         "ended_in_window_oom": eo, "ended_in_window_completed": ecp,
+         "cohort_note_en": "Submitted counts and ended counts describe different job sets: a job "
+                           "submitted before the window can end inside it, and a job submitted "
+                           "inside it can still be running.",
+         "cohort_note_zh": "「提交」與「結束」統計的是不同的任務集合：視窗前提交的任務可能在視窗內結束，"
+                           "而視窗內提交的任務也可能仍在執行。",
+      },
       "prediction_outcomes": {
-         "failures_in_window": nfail, "catch_rate_pct": catch,
+         # ONE cohort throughout: jobs submitted in the window. The identity below always holds, so
+         # the three flagged buckets can be read as a partition of flagged_total.
+         #   correct_warnings + false_alarms + pending_outcome == flagged_total
+         #   correct_warnings + misses                        == failures_resolved
+         "cohort_en": "Jobs submitted in this window. Jobs that had not ended at the report time are "
+                      "counted as pending, not as errors.",
+         "cohort_zh": "統計對象為本視窗內提交的任務。報告時間尚未結束的任務計為「待定」，不計為誤判。",
+         "flagged_total": int(flagged),
+         "failures_resolved": nfail, "catch_rate_pct": catch,
          "correct_warnings": {"count": len(correct), "examples": exlist(correct)},
          "false_alarms":     {"count": len(falarms), "examples": exlist(falarms)},
+         "pending_outcome":  {"count": len(pending), "examples": exlist_inflight(pending)},
          "misses":           {"count": len(misses),  "examples": exlist(misses)},
       },
       "node_onsets": {"count": int(len(ons)), "events": onset_events},
       "high_risk_nodes": high_nodes,
       "high_risk_jobs": high_jobs,
+      # Who owns the watch list. The top in-flight jobs routinely come out at the same risk to one
+      # decimal place, so the interesting fact is not their ranking but their CONCENTRATION -- in
+      # practice one user's batch often fills the entire list. Recording it as a fact lets the agent
+      # narrate it and lets the template caption state it, both inside the numeric gate.
+      "high_risk_jobs_concentration": _job_concentration(high_jobs),
       "watch_counts": {"nodes": len(high_nodes), "jobs": len(high_jobs)},
       "model_note": {
          "p3_threshold": thr, "p2_triage_pct": (int(pct) if float(pct).is_integer() else pct),
@@ -320,22 +413,50 @@ def _value_to_md(v) -> str:
     return str(v).strip()
 
 # ---- which parts of the reply are CLAIMS ABOUT THE DATA (and so must be numerically validated) ---
-# chart_configs and friends are rendering instructions, not assertions: a title, a chart type and a
-# mapping description legitimately carry numbers that are not fact values -- axis counts, top-N,
-# window sizes ("Plot the top 2 highest-risk nodes", "the 4 SLURM end states"). The frontend draws
-# charts from the database and never from anything the model says, so a number inside a chart spec
-# cannot become a false claim on screen. Validating them is a false positive by construction, and it
-# would trip on every future chart spec. This is a narrow, named exemption -- NOT an exemption for
-# prose: any other unrecognised key is still validated in full.
-_UNVALIDATED_KEYS = {"chart_configs", "chart_config", "charts", "chart_spec", "chart_specs",
-                     "visualisations", "visualizations", "figures"}
+# HISTORY, because this exemption used to be wider than it is now. Under the old contract a chart
+# spec was {title, type, description} -- free text describing how to draw something ("the top 2
+# highest-risk nodes", "the 4 SLURM end states"). Those numbers were rendering instructions, not
+# assertions about the data, so validating them was a false positive by construction and the whole
+# chart_configs key was skipped.
+#
+# The contract changed: a chart entry is now exactly {chart_id, caption}, and the two halves have
+# genuinely different natures, so the exemption is split to match.
+#
+#   chart_id  -- NOT prose. It is checked by membership of the ChartId enum, which is a stricter
+#                test than any numeric scan: an id either names a registered renderer or it is
+#                dropped. It carries no claim, so it stays exempt from the numeric gate.
+#   caption   -- ordinary prose the model wrote, displayed under a chart exactly like a sentence in
+#                the body. It gets the numeric hard gate like every other sentence. A caption
+#                reading "the three worst nodes exceeded 90%" is a claim, and if 90 is not a fact
+#                the report is rejected.
+#
+# Anything else the agent puts in a chart entry is validated too -- the exemption is for the id
+# field alone, not for "whatever appears inside chart_configs".
+_CHART_KEYS = {"chart_configs", "chart_config", "charts", "chart_spec", "chart_specs",
+               "visualisations", "visualizations", "figures"}
+_CHART_ID_FIELDS = {"chart_id", "chartid", "id", "chart"}
+
+def _chart_entries(obj: dict):
+    """(key, [entries]) for the agent's chart selection, or (None, []) if it made none."""
+    for k, v in (obj or {}).items():
+        if str(k).strip().lower() in _CHART_KEYS and isinstance(v, (list, tuple)):
+            return str(k), list(v)
+    return None, []
 
 def _claim_texts(obj: dict):
     """[(field_path, text)] the agent ASSERTED about the data. Field paths name the offender so a
     rejection can be diagnosed at a glance instead of by inference."""
     out = []
     for k, v in obj.items():
-        if str(k).strip().lower() in _UNVALIDATED_KEYS:
+        if str(k).strip().lower() in _CHART_KEYS and isinstance(v, (list, tuple)):
+            # captions are claims; the chart_id is not (see the note above)
+            for i, entry in enumerate(v):
+                if isinstance(entry, dict):
+                    for kk, vv in entry.items():
+                        if str(kk).strip().lower() in _CHART_ID_FIELDS:
+                            continue
+                        out.append((f"{k}[{i}].{kk}", str(vv)))
+                # a bare string entry is an id on its own -- nothing asserted, nothing to check
             continue
         if isinstance(v, (list, tuple)):
             for i, x in enumerate(v):
@@ -374,10 +495,17 @@ def _parse_json_object(raw: str):
     return o if isinstance(o, dict) and o else None
 
 def compose_markdown(obj: dict, lang: str) -> str:
-    """Dict -> markdown sections, expected keys first (in _SECTION_ORDER), the rest appended."""
+    """Dict -> markdown sections, expected keys first (in _SECTION_ORDER), the rest appended.
+
+    The chart selection is skipped here on purpose. Under the current contract those entries are
+    {chart_id, caption} pairs that become real rendered charts further down the pipeline; echoing
+    them into the prose as a "Chart configs" section would print the plumbing next to the picture.
+    """
     en = lang != "zh"
-    known = [k for k in _SECTION_ORDER if k in obj]
-    rest = [k for k in obj if k not in known]
+    skip = {k for k in obj if str(k).strip().lower() in _CHART_KEYS
+            and isinstance(obj[k], (list, tuple))}
+    known = [k for k in _SECTION_ORDER if k in obj and k not in skip]
+    rest = [k for k in obj if k not in known and k not in skip]
     out = []
     for k in known + rest:
         body = _value_to_md(obj[k])
@@ -450,13 +578,21 @@ def no_report_content(text: str, length: str = "full"):
 #            obj     -- the parsed agent reply (dict) when the JSON contract was used, else None
 #   output:  list of {"code": str, "message": str}; [] means nothing to flag
 #
-# Invariant: this function NEVER blocks. It cannot reject a report, it cannot raise, and its result
-# must not feed back into mode selection. Judgment-based checks used to reject outright, which threw
-# away reports that were perfectly good; they now surface as flags the operator can see and ignore.
+# A second advisory runs at the same seam but LATER in the pipeline, because it needs something
+# advisory_review() cannot see: caption_consistency_review(charts) compares each agent-written
+# caption against the chart it labels, and the charts do not exist until after the gate has run. It
+# returns the same shape and its findings join the same list. When the reviewer agent lands it
+# should be called alongside both.
+#
+# Invariant: these functions NEVER block. They cannot reject a report, they cannot raise, and their
+# results must not feed back into mode selection. Judgment-based checks used to reject outright,
+# which threw away reports that were perfectly good; they now surface as flags the operator can see
+# and ignore.
 # ================================================================================================
 ADV_LANGUAGE = "language_mismatch"
 ADV_META     = "meta_commentary"
 ADV_SHORT    = "short_content"
+ADV_CHART_ID = "unknown_chart_id"       # raised by select_charts, one per dropped id
 
 def advisory_review(text: str, lang: str, length: str = "full", obj=None) -> list:
     """Non-blocking quality flags for a report that has already passed the hard gate."""
@@ -478,6 +614,77 @@ def advisory_review(text: str, lang: str, length: str = "full", obj=None) -> lis
         out.append({"code": ADV_SHORT,
                     "message": f"Report is only {len(t)} characters, shorter than the {floor} "
                                f"expected for a '{length}' report."})
+    return out
+
+
+# ---- caption vs the chart it labels --------------------------------------------------------------
+# THE GAP THIS FILLS, and why it can only be advisory.
+#
+# The hard gate asks one question: does every number the agent wrote appear somewhere in the facts?
+# That is a whole-report test, and it is the right test for the body, where a sentence may
+# legitimately cite any fact. It is too weak for a CAPTION, because a caption is scoped to ONE chart
+# and inherits that chart's claim of relevance. An observed failure: a caption read "the 460 flagged
+# jobs, including the 34 missed failures" under a chart whose ring is the flagged cohort. 460 and 34
+# are both real facts, so the gate passed -- but the 34 are not among the 460, and the sentence is
+# false. No whole-report numeric test can catch that by construction: both numbers are present.
+#
+# So this compares each agent-written caption against ITS OWN chart's numbers. A number in a caption
+# that appears nowhere in the chart it labels is not necessarily wrong -- an operator may reasonably
+# mention the alert threshold, or the window length, under a chart that does not plot it -- which is
+# exactly why this NEVER blocks. It is a flag that says "check this sentence against this picture".
+#
+# WHAT THIS DELIBERATELY CANNOT CATCH, stated so nobody assumes otherwise.
+# The scope test is about membership, not about grammar. Both 212 and 47 genuinely appear on the
+# outcomes panel -- 212 as the ring's total, 47 in the footnote beside it -- so the sentence
+# "of the 212 flagged jobs, 47 were missed failures" passes this check even though the relation it
+# asserts is false. Tightening the set to exclude the footnote would not fix it either: it would
+# start flagging the CORRECT sentence ("separately, 47 failures were never flagged"), and an
+# advisory that fires on good text stops being read. A false relational claim between two numbers
+# that both belong to the panel is a judgment call, and judgment belongs to the reviewer agent, not
+# to a deterministic layer. What guards it today is structural rather than textual: misses are no
+# longer a slice of the ring, the footnote carries a note saying they are a different cohort, and
+# the prompt tells the agent not to describe them as flagged.
+ADV_CAPTION = "caption_chart_mismatch"
+
+def chart_numbers(chart: dict) -> set:
+    """Every number a caption on THIS chart can legitimately cite, at 0/1/2 dp.
+
+    Plotted values, anything numeric embedded in its own labels, its reference line, its axis
+    bound, its footnote, its stated segment sum, and the bar/bucket count -- since "six jobs" or
+    "24 buckets" is a fair thing to say about a chart with six bars or 24 buckets.
+    """
+    if not isinstance(chart, dict):
+        return set()
+    seed = {k: chart.get(k) for k in
+            ("labels", "datasets", "reference_line", "axis_max", "footnote", "segment_sum",
+             "bucket_count", "point_notes", "color_legend", "subject_node")}
+    S = allowed_numbers(seed)
+    for ds in (chart.get("datasets") or []):
+        data = ds.get("data") or []
+        S.add(len(data))                      # "four of the six", "across 24 buckets"
+        tot = sum(x for x in data if isinstance(x, (int, float)))
+        for x in (tot, round(float(tot), 1)):  # a caption may legitimately total a plotted series
+            S.add(round(x)); S.add(round(x, 1)); S.add(round(x, 2))
+    S.add(len(chart.get("labels") or []))
+    return S
+
+def caption_consistency_review(charts: list) -> list:
+    """Non-blocking flags where an agent-written caption cites a number its chart does not carry."""
+    out = []
+    for ch in (charts or []):
+        if not isinstance(ch, dict) or ch.get("caption_source") != "agent":
+            continue                          # Python-written captions are built from the chart
+        caption = str(ch.get("caption") or "")
+        if not caption.strip():
+            continue
+        stray = unverified_numbers(caption, chart_numbers(ch))
+        if stray:
+            out.append({"code": ADV_CAPTION,
+                        "message": f"Caption on '{ch.get('chart_id')}' cites "
+                                   f"{', '.join(stray)} — {'a number' if len(stray) == 1 else 'numbers'} "
+                                   f"that this chart does not plot. The figure may be real elsewhere "
+                                   f"in the facts, but it is not in this picture; check the sentence "
+                                   f"against the chart."})
     return out
 
 def compose_narration(raw: str, lang: str, length: str):
@@ -505,7 +712,10 @@ def compose_narration(raw: str, lang: str, length: str):
             if pick_k is not None:
                 text, claims = _flatten_to_paragraph(str(obj[pick_k])), [(pick_k, str(obj[pick_k]))]
             else:
-                text = _flatten_to_paragraph(" ".join(_value_to_md(v) for v in obj.values()))
+                # same exclusion as compose_markdown: chart entries are plumbing, not prose
+                text = _flatten_to_paragraph(" ".join(
+                    _value_to_md(v) for k, v in obj.items()
+                    if not (str(k).strip().lower() in _CHART_KEYS and isinstance(v, (list, tuple)))))
                 claims = _claim_texts(obj)
         else:
             text, claims = compose_markdown(obj, lang), _claim_texts(obj)
@@ -599,7 +809,7 @@ def trim_facts_for_prompt(facts: dict, lang: str = "en") -> dict:
     f.get("cluster_now", {}).pop("nodes_scored", None)        # not referenced by any report section
 
     po = f.get("prediction_outcomes", {})
-    for bucket in ("correct_warnings", "false_alarms", "misses"):
+    for bucket in ("correct_warnings", "false_alarms", "pending_outcome", "misses"):
         d = po.get(bucket)
         if isinstance(d, dict) and isinstance(d.get("examples"), list):
             d["examples"] = d["examples"][:PROMPT_EXAMPLES_CAP]
@@ -616,6 +826,40 @@ def trim_facts_for_prompt(facts: dict, lang: str = "en") -> dict:
     mn = f.get("model_note", {})
     mn.pop("caveat_zh" if lang != "zh" else "caveat_en", None)
     return f
+
+
+def _chart_menu_block(lang: str) -> str:
+    """The chart contract, spelled out for the agent.
+
+    The agent SELECTS and CAPTIONS; it never describes chart data. Every number on every chart is
+    computed in Python from the database, so there is nothing for the model to specify beyond which
+    question is worth showing and what to say underneath it.
+    """
+    langname = "Traditional Chinese (繁體中文)" if lang == "zh" else "English"
+    ids = "\n".join(f'  - "{cid.value}": {desc}' for cid, desc in chartreg.CHART_MENU.items())
+    return (
+        "CHARTS:\n"
+        "You may also select charts to accompany the report. The dashboard computes every chart's "
+        "data itself from the database -- you do not describe, specify or supply any chart data.\n"
+        "Available chart ids, and what each one answers:\n"
+        f"{ids}\n"
+        "Rules for the chart selection:\n"
+        f'  - Return them under the key "chart_configs", as a list of objects with EXACTLY two '
+        f'fields: "chart_id" and "caption".\n'
+        '  - "chart_id" must be copied verbatim from the list above. Do not invent ids.\n'
+        f'  - "caption" is one short sentence of prose, written in {langname}, exactly like the '
+        f'rest of the report, saying what the operator should take from that chart.\n'
+        "  - A caption is held to the same standard as the report body: any number in it must come "
+        "from FACTS DATA. Writing no number at all is always safe.\n"
+        "  - A caption must describe the chart it sits under, and only that chart. Do not put a "
+        "number in a caption unless that number is actually shown in THAT chart -- a figure that is "
+        "real elsewhere in the facts is still wrong under a chart that does not plot it. In "
+        "particular, missed failures are NOT part of the flagged cohort, so never describe them as "
+        "being among the flagged jobs.\n"
+        f"  - Select only the charts that matter for THIS shift -- at most {MAX_CHARTS}, fewer is "
+        "fine, and none is a valid answer on a quiet shift.\n"
+        "  - Do NOT include titles, chart types, axes, series, colours, or any data values.\n"
+    )
 
 
 def _build_prompt(payload: dict, lang: str, length: str) -> str:
@@ -647,13 +891,18 @@ def _build_prompt(payload: dict, lang: str, length: str) -> str:
         "download card, link or attachment. Put the report text in your reply directly.",
         "Do not describe yourself or your process ('I have generated...', 'As an AI...').",
         "If you answer with a JSON object, every value must be a plain STRING of report prose (or "
-        "a list of strings); no nested objects, no file references.",
+        "a list of strings), with the single exception of the chart selection described below; "
+        "no other nested objects, no file references.",
     ]
     body = "\n".join(f"- {r}" for r in rules)
+    # Charts belong to the full report panel; a brief report is one paragraph in a sidebar box with
+    # nowhere to draw them, so the menu is not sent at all for length="brief".
+    menu = f"{_chart_menu_block(lang)}\n" if length == "full" else ""
     return (
         f"WRITE THE ENTIRE RESPONSE IN {langname.upper()}.\n\n"
         f"Generate an operational shift report in {langname} with style/length '{length}'.\n\n"
         f"CRITICAL INSTRUCTIONS:\n{body}\n\n"
+        f"{menu}"
         f"FACTS DATA:\n{json.dumps(payload, ensure_ascii=False)}\n\n"
         f"REMINDER: the entire response must be written in {langname}, and must contain the "
         f"report content only."
@@ -774,30 +1023,32 @@ def render_template(facts: dict, lang: str, length: str) -> str:
     en = lang != "zh"
     w = facts["window"]; s = facts["settings"]; jw = facts["jobs_window"]
     po = facts["prediction_outcomes"]; on = facts["node_onsets"]
-    nfail = po["failures_in_window"]; corr = po["correct_warnings"]["count"]
+    nfail = po["failures_resolved"]; corr = po["correct_warnings"]["count"]
     miss = po["misses"]["count"]; fa = po["false_alarms"]["count"]
+    pend_out = po["pending_outcome"]["count"]; flagged = po["flagged_total"]
     hn = facts["high_risk_nodes"]; hj = facts["high_risk_jobs"]; cn = facts["cluster_now"]
     thr = s["p3_alert_threshold"]; tri = s["p2_triage_pct"]
     incident = (on["count"] > 0) or (nfail > 0)
 
     if length == "brief":
         if en:
-            head = f"Last {w['hours']} h: {jw['submitted']} jobs submitted ({jw['flagged']} flagged by P3), {jw['ended']} ended"
-            head += f" — {jw['ended_failed']} FAILED, {jw['ended_timeout']} TIMEOUT, {jw['ended_oom']} OOM."
+            head = f"Last {w['hours']} h: {jw['submitted']} jobs submitted ({flagged} flagged by P3), {jw['ended_in_window']} ended"
+            head += f" — {jw['ended_in_window_failed']} FAILED, {jw['ended_in_window_timeout']} TIMEOUT, {jw['ended_in_window_oom']} OOM."
             if nfail:
-                head += f" Of {nfail} failure{_plural(nfail,en)}, P3 caught {corr} and missed {miss} ({fa} false alarm{_plural(fa,en)})."
+                head += (f" Of the flagged jobs {corr} have failed and {fa} completed, with {pend_out} "
+                         f"still running; P3 missed {miss} failure{_plural(miss,en)}.")
             else:
-                head += " No job failures in the window."
+                head += " No submitted job has failed yet in the window."
             head += f" {on['count']} node anomaly onset{_plural(on['count'],en)}."
             head += f" Watching {len(hn)} node{_plural(len(hn),en)} and {len(hj)} high-risk job{_plural(len(hj),en)}."
             return head
         else:
-            head = f"近 {w['hours']} 小時：提交 {jw['submitted']} 個任務 (P3 標記 {jw['flagged']})，結束 {jw['ended']} 個"
-            head += f" — {jw['ended_failed']} 失敗、{jw['ended_timeout']} 逾時、{jw['ended_oom']} 記憶體不足。"
+            head = f"近 {w['hours']} 小時：提交 {jw['submitted']} 個任務 (P3 標記 {flagged})，結束 {jw['ended_in_window']} 個"
+            head += f" — {jw['ended_in_window_failed']} 失敗、{jw['ended_in_window_timeout']} 逾時、{jw['ended_in_window_oom']} 記憶體不足。"
             if nfail:
-                head += f" {nfail} 次失敗中 P3 命中 {corr}、漏報 {miss}（誤報 {fa}）。"
+                head += f" 已標記任務中 {corr} 個失敗、{fa} 個完成、{pend_out} 個仍在執行；另漏報 {miss} 次失敗。"
             else:
-                head += " 視窗內無任務失敗。"
+                head += " 視窗內提交的任務尚無失敗。"
             head += f" 節點異常 onset {on['count']} 次。目前關注 {len(hn)} 個節點、{len(hj)} 個高風險任務。"
             return head
 
@@ -816,11 +1067,17 @@ def render_template(facts: dict, lang: str, length: str) -> str:
                 L.append(f"    - node{e['node']:04d} (rack {e['rack']}) at {e['time']} [{e['kind']}]")
         else:
             L.append("- No node anomaly onsets in the window.")
-        L.append(f"- **{jw['ended']} jobs ended**: {jw['ended_failed']} FAILED, {jw['ended_timeout']} TIMEOUT, "
-                 f"{jw['ended_oom']} OOM, {jw['ended_completed']} COMPLETED.")
+        L.append(f"- **{jw['ended_in_window']} jobs ended in the window** (submitted at any time): "
+                 f"{jw['ended_in_window_failed']} FAILED, {jw['ended_in_window_timeout']} TIMEOUT, "
+                 f"{jw['ended_in_window_oom']} OOM, {jw['ended_in_window_completed']} COMPLETED.")
+        # Scoring switches cohort here, and says so: everything below counts jobs SUBMITTED in the
+        # window, so the flagged buckets add up to the flagged total.
+        L.append(f"- **Of the {jw['submitted']} jobs submitted in the window, P3 flagged {flagged}**: "
+                 f"**{corr} have since failed** (correct warnings), **{fa} completed** (false alarms), "
+                 f"and **{pend_out} are still running** (no outcome yet).")
         if nfail:
-            L.append(f"- **Warnings:** P3 raised **{corr} correct warning(s)** and had **{fa} false alarm(s)**; "
-                     f"it **missed {miss}** failure(s)"
+            L.append(f"- **Warnings:** against {nfail} failure(s) that have already ended, P3 caught "
+                     f"**{corr}** and **missed {miss}**"
                      + (f" (catch rate {po['catch_rate_pct']}%)." if po['catch_rate_pct'] is not None else "."))
             if corr and po["correct_warnings"]["examples"]:
                 L.append(f"    - correctly warned: jobs {_ids(po['correct_warnings']['examples'])}")
@@ -829,7 +1086,8 @@ def render_template(facts: dict, lang: str, length: str) -> str:
             if fa and po["false_alarms"]["examples"]:
                 L.append(f"    - false alarms (flagged but completed): jobs {_ids(po['false_alarms']['examples'])}")
         else:
-            L.append("- **Warnings:** no failures ended in the window to score.")
+            L.append("- **Warnings:** none of the jobs submitted in this window has failed yet, so "
+                     "there is no catch rate to report.")
         L.append("\n## Current risks")
         if hn:
             L.append("- Nodes to watch:")
@@ -876,10 +1134,15 @@ def render_template(facts: dict, lang: str, length: str) -> str:
                 L.append(f"    - node{e['node']:04d}（機櫃 {e['rack']}）於 {e['time']} [{e['kind']}]")
         else:
             L.append("- 視窗內無節點異常 onset。")
-        L.append(f"- **{jw['ended']} 個任務結束**：{jw['ended_failed']} 失敗、{jw['ended_timeout']} 逾時、"
-                 f"{jw['ended_oom']} 記憶體不足、{jw['ended_completed']} 完成。")
+        L.append(f"- **視窗內結束 {jw['ended_in_window']} 個任務**（提交時間不限）："
+                 f"{jw['ended_in_window_failed']} 失敗、{jw['ended_in_window_timeout']} 逾時、"
+                 f"{jw['ended_in_window_oom']} 記憶體不足、{jw['ended_in_window_completed']} 完成。")
+        # 以下改以「視窗內提交」的任務為統計對象，故各類別加總等於標記總數。
+        L.append(f"- **視窗內提交的 {jw['submitted']} 個任務中，P3 標記了 {flagged} 個**："
+                 f"**{corr} 個已失敗**（正確告警）、**{fa} 個已完成**（誤報）、"
+                 f"**{pend_out} 個仍在執行**（尚無結果）。")
         if nfail:
-            L.append(f"- **告警成效：** P3 發出 **{corr} 次正確告警**、**{fa} 次誤報**，並 **漏報 {miss}** 次失敗"
+            L.append(f"- **告警成效：** 已結束的 {nfail} 次失敗中，P3 命中 **{corr}**、**漏報 {miss}**"
                      + (f"（命中率 {po['catch_rate_pct']}%）。" if po['catch_rate_pct'] is not None else "。"))
             if corr and po["correct_warnings"]["examples"]:
                 L.append(f"    - 正確告警：任務 {_ids(po['correct_warnings']['examples'])}")
@@ -888,7 +1151,7 @@ def render_template(facts: dict, lang: str, length: str) -> str:
             if fa and po["false_alarms"]["examples"]:
                 L.append(f"    - 誤報（標記但完成）：任務 {_ids(po['false_alarms']['examples'])}")
         else:
-            L.append("- **告警成效：** 視窗內無結束的失敗任務可評分。")
+            L.append("- **告警成效：** 視窗內提交的任務尚無失敗結束，故無命中率可報告。")
         L.append("\n## 當前風險")
         if hn:
             L.append("- 需關注的節點：")
@@ -922,6 +1185,96 @@ def render_template(facts: dict, lang: str, length: str) -> str:
                  + (f"（PSU-0 ≤ {s['p2_cutoff_watts']} W）。" if s["p2_cutoff_watts"] else "。"))
         L.append(f"- 注意：{facts['model_note']['caveat_zh']}")
         return "\n".join(L)
+
+
+# ============================================================ 4b. CHARTS (selected by the agent,
+#                                                                        computed in Python)
+def select_charts(obj):
+    """The agent's chart selection -> ([(ChartId, caption)], [advisory, ...]).
+
+    The agent may name ids and write captions; it may do nothing else. Every id is checked against
+    the ChartId enum. An id outside the enum is DROPPED SILENTLY from the output -- it never reaches
+    a renderer and never becomes a broken panel -- and raises one advisory so the drop is visible
+    rather than mysterious. The selection is capped at MAX_CHARTS; the overflow is dropped without
+    an advisory, since selecting too many is not an error, just more than the panel can carry.
+    """
+    advisories, picked, seen = [], [], set()
+    key, entries = _chart_entries(obj or {})
+    if not entries:
+        return [], advisories
+
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            raw = next((entry[k] for k in entry if str(k).strip().lower() in _CHART_ID_FIELDS), None)
+            caption = str(entry.get("caption") or entry.get("text") or "").strip()
+        else:                                   # a bare id string, no caption
+            raw, caption = entry, ""
+        cid = chartreg.coerce_id(raw)
+        if cid is None:
+            advisories.append({"code": ADV_CHART_ID,
+                               "message": f"Agent asked for chart '{raw}' at {key}[{i}], which is "
+                                          f"not a known chart id; it was dropped."})
+            continue
+        if cid in seen:                          # a duplicate is not an error, just redundant
+            continue
+        seen.add(cid)
+        picked.append((cid, caption))
+
+    return picked[:MAX_CHARTS], advisories
+
+
+def assemble_charts(selection, facts, store, t, policies, lang):
+    """Render the selected charts. -> (rendered, unavailable).
+
+    `rendered` entries carry everything the frontend needs to draw: id, type, title reference,
+    caption, labels and datasets. Anything selected that cannot be drawn honestly is left out of
+    `rendered` and reported in `unavailable` with the renderer's own reason.
+
+    Two kinds of chart are appended regardless of what the agent chose, both with Python captions:
+
+      * NODE_FEATURE_CONTRIBUTIONS -- the "why is this flagged" chart. It answers the question the
+        drill-down panel exists for and the agent does not reliably pick it.
+      * the halves of a MANDATORY PAIR -- the failures-over-time bars and lines plot identical
+        numbers from one aggregation, so showing one without the other asks the reader to infer the
+        view they were not given. Selecting either pulls in the other; selecting neither pulls in
+        both. Nothing is forced into the output that is not independently available: an appended
+        chart still goes through its renderer and can still report itself unavailable.
+    """
+    rendered, unavailable = [], []
+    have = {cid for cid, _ in selection}
+    partner = {}
+    for a, b in chartreg.MANDATORY_PAIRS:
+        partner[a], partner[b] = b, a
+
+    # A missing partner is inserted IMMEDIATELY AFTER the chart that pulled it in, not at the end:
+    # the whole point of the pair is a side-by-side comparison, which fails if the two halves end up
+    # separated by three other charts.
+    chosen = []
+    for cid, caption in selection:
+        chosen.append((cid, caption))
+        mate = partner.get(cid)
+        if mate is not None and mate not in have:
+            chosen.append((mate, ""))
+            have.add(mate)
+    # neither half selected -> append the whole pair, still adjacent
+    for a, b in chartreg.MANDATORY_PAIRS:
+        if a not in have and b not in have:
+            chosen.extend([(a, ""), (b, "")])
+            have.update((a, b))
+    if ChartId.NODE_FEATURE_CONTRIBUTIONS not in have:
+        chosen.append((ChartId.NODE_FEATURE_CONTRIBUTIONS, ""))
+
+    for cid, caption in chosen:
+        res = chartreg.render(cid, facts, store, t, policies)
+        if not res.available:
+            unavailable.append(res.as_unavailable_entry())
+            continue
+        chart = dict(res.chart)
+        caption = (caption or "").strip()
+        chart["caption"] = caption or chartreg.default_caption(cid, facts, lang, chart)
+        chart["caption_source"] = "agent" if caption else "python"
+        rendered.append(chart)
+    return rendered, unavailable
 
 
 # ============================================================ 5. BUILD (facts + narrate + cache)
@@ -999,13 +1352,16 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
     schema = schema_strip_re(facts)          # the facts' own digit-bearing key names
     raw, reason = generate_llm(facts, lang, length)
     unver, bad_field, advisories, draft = [], None, [], None
+    selection, chart_adv = [], []
 
     if raw is not None:
         # shape the reply (JSON contract -> markdown, or prose as-is); `llm` is the composed text
         # even when the hard gate is about to reject it, so the draft can be preserved.
         llm, content_reason, claims, obj = compose_narration(raw, lang, length)
+        # the agent's chart picks: enum-validated, unknown ids dropped with an advisory each
+        selection, chart_adv = select_charts(obj)
         # ADVISORY LAYER: never blocks, never feeds back into `mode`. Reviewer-agent seam.
-        advisories = advisory_review(llm, lang, length, obj)
+        advisories = advisory_review(llm, lang, length, obj) + chart_adv
     else:
         llm, content_reason, claims, obj = None, None, None, None
 
@@ -1030,6 +1386,18 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
                       f"{'' if len(unver) == 1 else 's'} ({', '.join(unver)})")
             draft = {"text": llm, "field": bad_field, "unverified": unver, "reason": reason}
 
+    # ---- charts: computed here, from the facts and the store, for EVERY mode --------------------
+    # When the narration was not used (no key, endpoint down, numeric rejection) the agent's
+    # selection is discarded along with its prose and Python picks the full default set, so the
+    # panel looks the same offline as it does with the agent. Charts belong to the full report.
+    charts, charts_unavailable = [], []
+    if length == "full":
+        picks = selection if mode == "llm" else [(cid, "") for cid in chartreg.DEFAULT_ORDER]
+        charts, charts_unavailable = assemble_charts(picks, facts, store, t, policies, lang)
+        # ADVISORY LAYER, second pass: a caption can only be checked against its chart once the
+        # chart exists. Non-blocking, exactly like the rest of the layer -- `mode` is already final.
+        advisories = list(advisories) + caption_consistency_review(charts)
+
     out = {"text": text, "mode": mode, "length": length, "lang": lang, "window_h": window_h,
            "generated_iso": facts["now_iso"], "virtual_ts": t,
            # `checked` distinguishes "the numeric check ran and passed" from "it never ran because
@@ -1039,6 +1407,12 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
            # advisory flags: quality observations, NOT rejection reasons. Present on accepted
            # reports too -- a flagged report is still shown.
            "advisories": advisories,
+           # finished chart data: labels + datasets already computed, in the order to draw them.
+           # The frontend loops and draws; it computes nothing.
+           "charts": charts,
+           # selected (or auto-appended) but not drawable, with the renderer's reason -- so a
+           # missing chart is explained rather than silently absent.
+           "charts_unavailable": charts_unavailable,
            # the draft the hard gate threw away, kept so the next false positive is diagnosable at
            # a glance instead of by round-tripping. NOT rendered as the report; the template is.
            "rejected_draft": draft,

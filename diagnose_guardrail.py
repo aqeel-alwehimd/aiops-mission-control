@@ -13,15 +13,22 @@ from report import (compose_markdown, allowed_numbers, unverified_numbers,
 # ---- facts: the shape assemble_facts returns, deliberately WITHOUT a bare 2 anywhere -------------
 FACTS = {
     "now_iso": "2022-09-27 19:52Z",
-    "window": {"hours": 24, "start_iso": "2022-09-26 19:52Z", "end_iso": "2022-09-27 19:52Z"},
+    # start_ts/end_ts mirror what assemble_facts really emits; the time-bucketing charts need them
+    "window": {"hours": 24, "start_ts": 1664221920, "end_ts": 1664308320,
+               "start_iso": "2022-09-26 19:52Z", "end_iso": "2022-09-27 19:52Z"},
     "settings": {"p3_alert_threshold": 0.30, "p2_triage_pct": 25, "p2_cutoff_watts": 286},
     "cluster_now": {"active_jobs": 1374, "running": 984, "pending": 390,
                     "nodes_total": 826, "nodes_anomalous": 0, "utilisation_pct": 68.6},
-    "jobs_window": {"submitted": 1501, "flagged": 212, "ended": 1244,
-                    "ended_failed": 44, "ended_timeout": 31, "ended_oom": 5, "ended_completed": 1066},
-    "prediction_outcomes": {"failures_in_window": 77, "catch_rate_pct": 38.8,
+    "jobs_window": {"submitted": 1501, "flagged_at_submission": 212,
+                    "submitted_outcome_known": 1290, "submitted_still_running": 211,
+                    "ended_in_window": 1244, "ended_in_window_failed": 44,
+                    "ended_in_window_timeout": 31, "ended_in_window_oom": 5,
+                    "ended_in_window_completed": 1066},
+    # cohort-consistent: 30 + 182 + 0 = 212 = flagged_total; 30 + 47 = 77 = failures_resolved
+    "prediction_outcomes": {"flagged_total": 212, "failures_resolved": 77, "catch_rate_pct": 38.8,
                             "correct_warnings": {"count": 30, "examples": [{"job_id": 4288317}]},
                             "false_alarms": {"count": 182, "examples": [{"job_id": 4290155}]},
+                            "pending_outcome": {"count": 0, "examples": []},
                             "misses": {"count": 47, "examples": [{"job_id": 4291002}]}},
     "node_onsets": {"count": 6, "events": [{"node": 697, "rack": 34, "time": "09-26 20:00",
                                             "kind": "isolated"}]},
@@ -48,11 +55,16 @@ REPLY = {
         "Review the 47 missed failures against the 0.3 alert threshold.",
         "Leave the triage at 25% of node-slots for now.",
     ],
+    # CONTRACT NOTE: this is the CURRENT chart shape -- an enum id plus a caption, nothing else.
+    # The historical false positive this script diagnoses came from the OLD shape
+    # ({title, type, description}), whose free-text "top 2 nodes" / "4 SLURM end states" carried
+    # numbers that were rendering instructions rather than claims. Under the current contract the
+    # id is enum-checked and exempt, while the caption is model prose and IS numerically gated.
     "chart_configs": [
-        {"title": "Node risk over time", "type": "line",
-         "description": "Plot the top 2 highest-risk nodes across the window."},
-        {"title": "Job outcome mix", "type": "bar",
-         "description": "Stacked bar of the 4 SLURM end states."},
+        {"chart_id": "node_risk_watch",
+         "caption": "The watch-list nodes against the node alert threshold."},
+        {"chart_id": "job_outcome_mix",
+         "caption": "Final states of the jobs that ended in the window."},
     ],
 }
 
@@ -127,18 +139,20 @@ def report_composition_finding():
 
     print(f"  unmatched numbers by source: {json.dumps(field_bad, ensure_ascii=False)}")
     print()
-    if field_bad.get("chart_configs") and not any(k in field_bad for k in
-                                                  ("executive_summary", "risk_assessment", "action_playbook")):
-        print("  => The agent's PROSE is clean. Every unmatched number comes from chart_configs,")
-        print("     which are rendering instructions (axis counts, top-N, window sizes), not claims")
-        print("     about the data. Validating them is a false positive by construction.")
+    if not field_bad:
+        print("  => Nothing unmatched anywhere: this reply passes the gate cleanly.")
+    elif field_bad.get("chart_configs") and not any(k in field_bad for k in
+                                                    ("executive_summary", "risk_assessment", "action_playbook")):
+        print("  => The unmatched numbers are inside chart_configs. Under the CURRENT contract that")
+        print("     is a genuine hit, not a false positive: the caption is model prose and is gated")
+        print("     like any sentence. Only the chart_id itself is exempt (enum membership).")
     elif field_bad.get("scaffolding"):
         print("  => Composition scaffolding is contributing digits. Fix the scaffolding, not the model.")
     else:
         print("  => Unmatched numbers come from the agent's prose; that is a genuine guardrail hit.")
     print()
-    print("  NOTE on rendering: _value_to_md() sends a list of dicts through str(x), so chart_configs")
-    print("  is emitted as a raw Python dict repr into the report body (see STEP 3c above).")
+    print("  NOTE on rendering: compose_markdown() now SKIPS the chart keys entirely -- they become")
+    print("  real rendered charts, so echoing them into the prose would print the plumbing.")
 
 
 

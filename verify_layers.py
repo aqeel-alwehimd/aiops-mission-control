@@ -50,10 +50,13 @@ BASE = {
     "risk_assessment":   "P2 flagged 6 onsets; node0697 in rack 34 leads at 41.2%.",
     "action_playbook":   ["Inspect node0697 in rack 34."],
 }
-CHARTS = [{"title": "Node risk over time", "type": "line",
-           "description": "Plot the top 2 highest-risk nodes across the window."},
-          {"title": "Job outcome mix", "type": "bar",
-           "description": "Stacked bar of the 4 SLURM end states, 3 series wide."}]
+# the CURRENT chart contract: an enum id plus a caption, nothing else. The id is exempt from the
+# numeric gate (it is validated by enum membership instead); the caption is model prose and is
+# gated like any sentence -- see verify_charts.py for the dedicated coverage.
+CHARTS = [{"chart_id": "node_risk_watch",
+           "caption": "The nodes worth watching, against the alert threshold."},
+          {"chart_id": "job_outcome_mix",
+           "caption": "How the jobs that ended in this window finished."}]
 
 # ============================================================ 1. THE BUG: schema identifiers
 d = run({**BASE,
@@ -103,11 +106,31 @@ show("FIXTURE 4 - comma-grouped 1,244 (regression)", d)
 check("mode == llm", d["mode"] == "llm", d["mode"])
 check("no unmatched numbers", d["numeric_check"]["unverified"] == [])
 
-# ============================================================ 5. chart-spec numbers (regression)
+# ============================================================ 5. chart contract (regression)
 d = run({**BASE, "chart_configs": CHARTS})
-show("FIXTURE 5 - chart_configs carry 2, 4, 3 -- none of them facts (regression)", d)
-check("mode == llm (chart specs exempt)", d["mode"] == "llm", d["mode"])
+show("FIXTURE 5 - chart entries: enum-checked ids, clean captions", d)
+check("mode == llm", d["mode"] == "llm", d["mode"])
 check("no unmatched numbers", d["numeric_check"]["unverified"] == [])
+check("chart plumbing is not echoed into the prose", "chart_id" not in d["text"])
+check("the ids became real, server-computed charts",
+      {"node_risk_watch", "job_outcome_mix"} & {c["chart_id"] for c in d["charts"]}
+      or any(u["chart_id"] in ("node_risk_watch", "job_outcome_mix") for u in d["charts_unavailable"]),
+      str([c["chart_id"] for c in d["charts"]]))
+# ...and a caption is NOT exempt: only the id is
+d = run({**BASE, "chart_configs": [
+    {"chart_id": "job_outcome_mix", "caption": "All 4242 of them completed cleanly."}]})
+check("a fabricated number in a CAPTION is rejected",
+      d["mode"] == "template_llm_rejected" and d["numeric_check"]["unverified"] == ["4242"],
+      f"{d['mode']} {d['numeric_check']['unverified']}")
+check("   and the caption field is named",
+      "chart_configs[0].caption" in (d["fallback_reason"] or ""), repr(d["fallback_reason"]))
+# ...and an unknown id is dropped with a flag rather than rejecting the report
+d = run({**BASE, "chart_configs": [{"chart_id": "made_up_chart", "caption": "Clean caption."}]})
+check("an unknown chart_id drops with an advisory, it does not reject",
+      d["mode"] == "llm" and any(a["code"] == report.ADV_CHART_ID for a in d["advisories"]),
+      f"{d['mode']} {[a['code'] for a in d['advisories']]}")
+check("   the dropped id never reaches the rendered list",
+      "made_up_chart" not in [c["chart_id"] for c in d["charts"]])
 
 # ============================================================ 6. Chinese reply to an English request
 d = run({"executive_summary": "過去 24 小時叢集共提交 1501 個任務，結束 1244 個，其中 1066 個順利完成。"

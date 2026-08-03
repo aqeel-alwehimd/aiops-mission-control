@@ -148,7 +148,7 @@ answer, surfaced in the Policies tab under *模型資訊與資料透明度*.
 | `GET`/`POST /api/policies` | read / update settings **in memory** (never written to disk) |
 | `POST /api/policies/reset` | restore the seeded default policies (in memory) |
 | `GET /api/model_info` | model names, metrics, training windows, feature counts, methodology, and the explicit unavailable-fields list |
-| `GET /api/report` | auto-generated operations report at the current virtual time — params `window` (lookback hours), `lang` (`en`/`zh`), `length` (`brief`/`full`); returns the generated `text`, the `mode`, and the underlying `facts` JSON |
+| `GET /api/report` | auto-generated operations report at the current virtual time — params `window` (lookback hours), `lang` (`en`/`zh`), `length` (`brief`/`full`); returns the generated `text`, the `mode`, the underlying `facts` JSON, `charts` (fully computed labels + datasets per selected chart, in draw order) and `charts_unavailable` (selected but not drawable, with the reason). `charts` is populated for `length=full` only. |
 | `GET /api/heroes` | guided-tour anchors (hero IDs + virtual timestamps to jump to), from `data/hero_examples.json` |
 | `GET /health` | liveness probe → `{"status":"ok"}` |
 
@@ -192,9 +192,25 @@ system state at the current virtual time. The split is strict and mandatory:
 1. **Facts are computed in Python, never by the LLM.** `assemble_facts()` reads only real values
    from `demo.sqlite` for a virtual time + lookback window: jobs submitted / flagged / ended and
    the FAILED/TIMEOUT/OOM breakdown; prediction outcomes in the window (**correct warnings, false
-   alarms, and — reported honestly — misses**, with counts and example IDs); node anomaly onsets
-   with node IDs and times; nodes currently carrying high P2 risk with their sensor readings; the
-   highest-risk running/queued jobs; and the operating settings in force.
+   alarms, still-running jobs with no outcome yet, and — reported honestly — misses**, with counts
+   and example IDs); node anomaly onsets with node IDs and times; nodes currently carrying high P2
+   risk with their sensor readings; the highest-risk running/queued jobs; and the operating
+   settings in force.
+
+   **Two cohorts, named as such.** The window holds two different job sets and they must not be
+   mixed: jobs **submitted** inside it (`submitted`, `flagged_at_submission`, `submitted_still_running`)
+   and jobs that **ended** inside it (`ended_in_window*`), whenever they were submitted. Neither
+   contains the other. All prediction scoring uses the *submitted* cohort only, so two identities
+   hold at every virtual time and are asserted by `verify_cohort.py`:
+
+   ```
+   correct_warnings + false_alarms + pending_outcome == flagged_total
+   correct_warnings + misses                        == failures_resolved
+   ```
+
+   A flagged job that has not ended at the report time lands in `pending_outcome` rather than
+   vanishing. Its example entries carry only the observable `status` (RUNNING / PENDING), never the
+   eventual SLURM state, which is a future fact at that virtual time.
 2. **The LLM only narrates those facts.** `generate_llm()` sends the facts JSON with an instruction
    to use only the supplied values, invent nothing, compute no new ratios, report misses, and phrase
    actions as recommendations for a human to approve (never as actions taken). **The output is then
@@ -229,6 +245,95 @@ follow, and the second one is easy to lose an afternoon to:
   language for the request, or a near-empty reply. On rejection the deterministic template is served
   with `mode = "template_llm_rejected"` and a `fallback_reason` naming the cause. The numeric
   guardrail then runs on the **composed** text, so validation is never bypassed by this step.
+
+### Charts: the agent selects, Python computes
+
+Charts follow the same rule as the prose — **the model never produces a number**. `charts.py` holds a
+closed `ChartId` enum and one renderer per id; each renderer builds its labels and datasets from the
+facts dictionary or from SQLite, and the frontend draws exactly what it is handed.
+
+The agent's contribution is two fields per chart and nothing else:
+
+```json
+"chart_configs": [ { "chart_id": "prediction_outcomes", "caption": "one sentence of prose" } ]
+```
+
+* **`chart_id` is validated by enum membership**, which is stricter than any numeric scan: an id
+  outside the enum is dropped, never rendered, and raises one `unknown_chart_id` advisory naming it.
+  The selection is capped at `MAX_CHARTS`. Duplicates collapse.
+* **`caption` is ordinary model prose and passes the numeric hard gate** like any sentence in the
+  body — a caption citing a figure absent from the facts rejects the report and names
+  `chart_configs[i].caption` as the offending field. Only the id is exempt; a third field smuggled
+  into a chart entry is validated too. (This is a *narrowing* of an older exemption, which skipped
+  the whole `chart_configs` key back when a spec was free text describing how to draw something.)
+* **`node_feature_contributions` is appended by Python** whenever the agent did not select it and it
+  is available — it answers the "why is this flagged" question the drill-down panel exists for, and
+  the agent does not reliably choose it. Its caption is then Python-written.
+* **The template fallback populates the same charts from the same registry**, so with no API key and
+  no external call the panel looks identical, captions and all.
+
+**What the database can and cannot support** (measured, not assumed — see `verify_cohort.py` and the
+schema itself):
+
+| Question | Answer |
+|---|---|
+| Per-job end timestamps + outcome labels fine enough for 15-minute bins? | **Yes.** `jobs.end_ts` is 1-second resolution (11,330 distinct values in the slim window) and `jobs.state` carries COMPLETED / FAILED / TIMEOUT / OUT_OF_MEMORY. All 288 buckets of the 72 h window are populated. |
+| Raw IPMI sensor series at **native** sampling? | **No.** The finest resolution anywhere in `demo.sqlite` is **15-minute means** — `node_slots.ts` is 100 % aligned to the 900 s grid in both editions, and the values are averages (e.g. `power = 943.111`). `precompute.py` builds the table from `p09_test`, the already-aggregated matrix the P2 model was trained on; native ~20 s IPMI lives upstream in the parquet/tarball pipeline. Present per node: `temp` (max GPU0/GPU1 core °C), `power` (`cur_totP`, W), `fan` (`cur_fan0_0`, rpm), `ambient` (°C), `ps_power` (PSU-0 input W). Coverage: full store = all 826 nodes at 15 min; slim edition keeps the 10 onset nodes at 15 min and thins quiet nodes to hourly. |
+| Stored **global** feature importance? | **P3 yes, P2 no.** `meta.json["p3_global_importance"]` holds 15 features scored by permutation importance (mean test ROC-AUC drop over 3 repeats, computed in `precompute.py`). There is no equivalent for P2 — only the 363 feature names, 20 curated labels, and per-slot `contrib_json`. |
+
+**Failures over time — one query, one aggregation, two views.** `charts.failures_over_time()` is the
+single query and the single aggregation behind both `failures_over_time_bars` (stacked) and
+`failures_over_time_lines` (multi-line with a heavier total). Neither renderer queries independently,
+so the two pictures cannot disagree; the result is memoised per (store, window). They are a
+**mandatory pair**: selecting either pulls in the other, adjacent, with a Python caption. Buckets are
+fixed 15 minutes on the epoch grid, and the bucket **count is unbounded** — a 48 h window is 193
+buckets and a 96 h one 385, every point plotted. Crowding is handled by thinning axis *labels*
+(`autoSkip`), never by dropping data, because an isolated single failure is exactly what the chart
+exists to show. Lines use `tension: 0` — these are counts in discrete bins and a curve would draw
+values between them that do not exist.
+
+**Layout.** Every registry entry carries a `width` hint (`half` | `full`) in `charts.LAYOUT`; the
+time-series charts are full, the rest half. The frontend simulates row placement and promotes a
+stranded half to full, so an odd chart count — or a full-width chart following an odd number of
+halves — never leaves a visible empty cell.
+
+**`prediction_outcomes` is the flagged cohort only.** It was a four-segment doughnut including
+misses, which made the ring sum to `flagged_total + misses` — a quantity that means nothing, and
+which licensed a caption reading "the 460 flagged jobs, including the 34 missed failures" where every
+number is a real fact and the sentence is false. The ring is now three segments that sum exactly to
+`flagged_total` (stated in the subtitle and asserted in tests); misses are surfaced as a labelled
+footnote beside it, with a note saying why they are not a slice.
+
+**A renderer that cannot answer honestly says so.** It returns *unavailable* with a reason rather
+than an empty or misleading chart, and no data point is ever padded or invented to fill one. Those
+appear in `charts_unavailable` on the response and are listed under the panel. Two refusal classes:
+`no_rows` (nothing to plot) and `degenerate` — most importantly `node_risk_watch`, which refuses when
+every watch-list node scores below `NODE_RISK_MIN_FRACTION_OF_ALERT` (25 %) of the alert threshold,
+because three stubs beside a reference line four times their height tell an operator nothing. On a
+quiet shift that chart is *supposed* to be absent.
+
+**Global importance is a static panel, not a report chart.** `charts.model_importance_panels()` is
+served on `/api/model_info` and drawn once in the model-info view. It is deliberately **outside the
+`ChartId` enum** — the agent cannot select it, and asking for it by name is dropped like any unknown
+id. The panel names its metric (permutation importance, mean ROC-AUC drop) rather than showing a bare
+number, and carries explicit bilingual text separating it from `node_feature_contributions`: one is
+the model's average reliance across all predictions (unsigned, fixed), the other is one node's one
+slot (signed log-odds, different every slot). **P2 has no panel** — see the table above — and is
+reported as unavailable with the reason. Averaging the stored per-slot contributions would produce a
+biased local average, not a global importance, so it is refused rather than improvised.
+
+**Caption vs its own chart** (advisory, non-blocking, at the reviewer-agent seam).
+`caption_consistency_review()` checks each agent-written caption against `chart_numbers()` — that
+chart's plotted values, labels, reference line, axis bound, footnote and bar count. The hard gate
+asks only "is this number a fact somewhere?", which is the right test for the body and too weak for a
+caption scoped to one picture. Documented limit: it tests membership, not grammar, so a false
+*relation* between two numbers that both appear on the panel is invisible to it. That class is
+handled structurally (misses are no longer a slice) and by the prompt, and belongs to the reviewer
+agent.
+
+Axis labels, legends, category names and reference-line labels travel as i18n **references**
+(`{"key": …}`), or as bilingual pairs when they come from the database (`{"en": …, "zh": …}`), so the
+EN/中文 toggle relabels a chart without a second API call. Captions come from the API as-is.
 
 ### Endpoint resilience, and the pre-demo prewarm
 
@@ -284,6 +389,22 @@ the next request, and `GET /api/report?nocache=1` forces a fresh generation. Suc
 cached by (virtual-time bucket, window, language, length, thresholds) with a short TTL, so repeated
 polling does not trigger repeated API calls.
 
+### Verification scripts
+
+Each exits non-zero on failure, starts no server, and makes no network call (the resilience suite
+mocks the HTTP layer). On Windows set `PYTHONIOENCODING=utf-8` first, or the CJK fixtures cannot be
+printed to a cp1252 console.
+
+| Script | Covers |
+|---|---|
+| `verify_cohort.py` | the flagged/outcome **cohort identities**, across the whole replay window at several lookbacks and thresholds; key naming; no future-state leakage in the pending bucket |
+| `verify_guardrail.py` | the numeric extractor: digit grouping, hallucinations, decimals, model tokens |
+| `verify_charts.py` | the **chart contract**: enum-validated ids, gated captions, unavailability and degeneracy rules, the auto-appended contributions chart, the template fallback's charts |
+| `verify_layers.py` | hard gate vs advisory layer, schema-identifier exemption, preserved rejected draft |
+| `verify_narration.py` | reply-shape post-processing (JSON contract, plain markdown, meta-commentary) |
+| `verify_fallback.py` | `fallback_reason` wording, caching policy, circuit breaker |
+| `verify_resilience.py` | retries, error-class cooldowns, prompt trimming, secret hygiene |
+
 ## Deployment (Render, free tier, native Python — no Docker)
 
 The app is built to run on a read-only, ephemeral, sleep-when-idle free instance.
@@ -291,6 +412,7 @@ The app is built to run on a read-only, ephemeral, sleep-when-idle free instance
 **New files that make this work**
 | File | Role |
 |---|---|
+| `charts.py` | The chart registry: the closed `ChartId` enum, one renderer per id, the availability/degeneracy rules, and the Python-written fallback captions. Every plotted value is computed here — the model only picks ids and writes captions. |
 | `make_demo_edition.py` | Curates the 490 MB `demo.sqlite` into `data/demo_lite.sqlite` (~48 MB) + `data/hero_examples.json`. Narrows to the 3-day high-event window, keeps every job overlapping it, keeps all nodes (onset nodes at full 15-min cadence, quiet nodes thinned to hourly), preserves every drill-down feature value, and `VACUUM`s. |
 | `data/demo_lite.sqlite` | The committed, served database (well under GitHub's 100 MB limit). Carries its own replay window in a `demo_meta` table. |
 | `data/hero_examples.json` | Three guaranteed "hero" moments (a caught high-risk TIMEOUT, a node flagged before a real onset, and an honest miss) with the virtual timestamps to jump to. Served at `GET /api/heroes`. |

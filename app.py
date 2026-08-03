@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from models import Store
 from replay import VirtualClock
 from report import build_report
+import charts as chartreg
 from dotenv import load_dotenv
 load_dotenv()  # Loads variables from .env into os.environ
 
@@ -82,6 +83,13 @@ def api_model_info():
     mi["p2_risk_filter"] = {"indicator": store.meta["p2_power_indicator"],
                             "cutoffs_watts": store.meta["p2_power_cutoffs_watts"],
                             "note": store.meta["p2_filter_note"]}
+    # model-LEVEL global importance, one static panel per model. Deliberately served here and not
+    # from /api/report: it is a property of the model, not of the shift, and it is not something the
+    # agent may select (it is not in the ChartId enum). Models with no STORED global importance are
+    # reported in `unavailable` rather than filled in from a lookalike quantity.
+    imp = chartreg.model_importance_panels(store)
+    mi["importance_panels"] = imp["panels"]
+    mi["importance_unavailable"] = imp["unavailable"]
     return mi
 
 

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mission Control M100</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Noto+Sans+TC:wght@300;400;500;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <script>
@@ -283,6 +284,17 @@
                         <div class="glass-panel p-6 border-l-4 border-l-slate-500">
                             <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-3"><i class="fa-solid fa-circle-info text-slate-300"></i> <span data-i18n="pol.info.h">模型資訊與資料透明度 (Model Info / Data Honesty)</span></h3>
                             <div id="model-info-body" class="text-sm text-slate-300 space-y-3">…</div>
+                            <!-- model-LEVEL global importance. A static panel, not part of the shift
+                                 report and not selectable by the agent. -->
+                            <div id="mi-importance" class="mt-5 pt-4 border-t border-slate-700/50 hidden">
+                                <div class="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-2">
+                                    <i class="fa-solid fa-ranking-star mr-1"></i><span id="mi-importance-h"></span>
+                                </div>
+                                <p id="mi-importance-scope" class="text-[11px] text-slate-400 mb-1"></p>
+                                <p id="mi-importance-vs" class="text-[11px] text-amber-300/80 mb-3 leading-relaxed"></p>
+                                <div id="mi-importance-grid" class="space-y-3"></div>
+                                <div id="mi-importance-missing" class="mt-2 text-[10px] text-slate-500 hidden"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -335,6 +347,16 @@
             <div class="px-6 py-2 text-[11px] text-slate-500 border-b border-slate-800/60 shrink-0"><span data-i18n="report.generatedAt">產生於 (虛擬時間)</span>: <span id="report-genat" class="font-mono">—</span><span id="report-why" class="text-amber-400/80 hidden"></span></div>
             <div id="report-scroll" class="flex-1 min-h-0 overflow-y-auto overscroll-contain detail-scroll px-6 py-4">
                 <div id="report-body" class="text-sm text-slate-200 leading-relaxed report-md"></div>
+                <!-- Charts. Every value drawn here arrives fully computed from /api/report; this
+                     block only loops over what the API returned, in the order it returned. Hidden
+                     entirely when the API selected nothing that could be drawn. -->
+                <div id="report-charts" class="mt-6 border-t border-slate-700/50 pt-4 hidden">
+                    <div id="report-charts-head" class="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-3 hidden">
+                        <i class="fa-solid fa-chart-column mr-1"></i><span id="report-charts-title"></span>
+                    </div>
+                    <div id="report-charts-grid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
+                    <div id="report-charts-skipped" class="mt-3 text-[10px] text-slate-500 leading-relaxed hidden"></div>
+                </div>
                 <details class="mt-6 border-t border-slate-700/50 pt-3">
                     <summary class="cursor-pointer text-xs text-cyan-400" data-i18n="report.rawfacts">原始事實 (JSON — 報告的依據)</summary>
                     <pre id="report-facts" class="mt-2 text-[10px] text-slate-400 bg-slate-900/60 rounded p-3 max-h-[40vh] overflow-auto overscroll-contain detail-scroll"></pre>
@@ -377,7 +399,38 @@
             "d.why.global":"全域重要性 (跨所有任務，非此列的個別歸因)","d.why.per":"個別預測歸因 (此時槽的 LightGBM 貢獻，log-odds)","d.importance":"重要性","d.thisval":"此列數值","d.contrib":"貢獻","d.increases":"↑ 提高風險","d.decreases":"↓ 降低風險",
             "d.risk":"風險分數","d.predclass":"預測類別","d.threshold":"操作門檻","d.flagged":"已標記","d.notflagged":"未標記","d.inscope":"評分中 (在分流範圍內)","d.outscope":"分流略過 (低功耗指標判為低風險)","d.close":"關閉","d.probs":"各類別機率",
             "empty.jobs":"此時間點暫無任務","empty.nodes":"此時間點暫無節點資料","empty.logs":"此時間點暫無事件","node.triaged":"分流略過 (低風險)","job.ended":"已結束","risk.low":"低風險","risk.threshold":"門檻","node.showing":"顯示","node.of":"/","node.scoring":"評分中","node.band":"低功耗帶","node.anom":"異常","node.warn":"警示","job.showing":"顯示","job.rows":"筆 (在險/最近結束)",
-            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":"下載 .md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板","report.why":"回退原因","report.advisory":"提醒","report.draft":"遭退回的草稿 (AI 原文)"
+            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":"下載 .md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板","report.why":"回退原因","report.advisory":"提醒","report.draft":"遭退回的草稿 (AI 原文)",
+            // charts: every label a reader sees that is NOT data. The values themselves arrive
+            // fully computed from /api/report and are never touched here.
+            "chart.section":"圖表 (資料由後端計算)","chart.skipped":"未產生的圖表",
+            "chart.predictionOutcomes.title":"P3 告警成效（已標記任務）","chart.predictionOutcomes.sub":"三個區塊加總 = 已標記任務總數。漏報不在此環圖內（見下方註記）",
+            "chart.predictionOutcomes.missNote":"漏報屬於「未被標記」的任務，與環圖為不同集合，故不列為區塊",
+            "chart.failuresOverTime.title":"失敗事件時間分佈（15 分鐘一格）","chart.failuresOverTime.sub":"以任務「結束時間」分格；解析度 15 分鐘",
+            "chart.failuresOverTimeLines.title":"失敗事件趨勢（15 分鐘一格）",
+            "chart.axis.binEnd":"時間（每格 15 分鐘）","chart.axis.failuresPerBin":"每格失敗次數",
+            "chart.legend.totalFailures":"合計",
+            "chart.cohort.endedInWindow":"統計對象：本視窗內結束的任務（提交時間不限）",
+            "chart.cohort.flagged":"統計對象：本視窗內被標記的任務",
+            "chart.jobOutcomeMix.title":"任務結束狀態分佈","chart.jobOutcomeMix.sub":"本視窗內結束的任務（提交時間不限）",
+            "chart.topFlaggedJobs.title":"最高風險的已標記任務","chart.topFlaggedJobs.sub":"執行中／排隊中，風險達告警門檻",
+            "chart.nodeRiskWatch.title":"關注節點 P2 風險","chart.nodeRiskWatch.sub":"與節點告警門檻的比較",
+            "chart.nodeContrib.title":"此節點為何被標記","chart.nodeContrib.sub":"該次預測的特徵貢獻 (log-odds)",
+            "chart.cat.caught":"正確告警","chart.cat.falseAlarm":"誤報","chart.cat.missed":"漏報","chart.cat.pending":"待定 (仍在執行)",
+            "chart.cat.completed":"完成","chart.cat.failed":"失敗","chart.cat.timeout":"逾時","chart.cat.oom":"記憶體不足",
+            "chart.legend.jobs":"任務數","chart.legend.predictedRisk":"預測風險","chart.legend.p2Risk":"P2 風險","chart.legend.contribution":"貢獻",
+            "chart.axis.finalState":"最終狀態","chart.axis.riskPct":"風險 (%)","chart.axis.node":"節點","chart.axis.logOdds":"對風險的貢獻 (log-odds)",
+            "chart.ref.jobAlert":"任務告警門檻","chart.ref.nodeAlert":"節點告警門檻","chart.ref.zero":"零",
+            // model-LEVEL importance (static panel on the model-info view) -- deliberately worded to
+            // separate it from the per-prediction contribution chart in the report
+            "mi.importance.h":"模型層級特徵重要性 (Global Feature Importance)",
+            "mi.importance.p3.title":"P3 任務結果模型 — 全域特徵重要性",
+            "mi.importance.p3.sub":"跨測試集全部預測計算，非任何單一任務的歸因",
+            "mi.importance.p3.metric":"指標：排列重要性 — 打亂該特徵後測試集 ROC-AUC 的平均下降幅度（3 次重複取平均）。數值越大代表模型越依賴此特徵。",
+            "mi.importance.p3.axis":"ROC-AUC 下降量（排列重要性）",
+            "mi.importance.legend":"重要性",
+            "mi.importance.scope":"範圍：整個模型、全部預測。此圖不隨虛擬時間改變，也不描述任何單一任務或節點。",
+            "mi.importance.vsPerPrediction":"請勿與報告中的「此節點為何被標記」混淆：該圖是單一節點、單一 15 分鐘時槽的個別預測歸因（帶正負號的 log-odds 貢獻），每個時槽都會改變；此處為模型整體平均依賴程度（無正負號、固定不變）。",
+            "mi.importance.unavailable":"未提供全域重要性"
           },
           en: {
             "app.subtitle":"Marconi100 ExaData · real-model replay","howitworks.btn":"How it works",
@@ -403,7 +456,34 @@
             "d.why.global":"Global importance (across all jobs — NOT this row's per-prediction attribution)","d.why.per":"Per-prediction attribution (this slot's LightGBM contributions, log-odds)","d.importance":"importance","d.thisval":"this row","d.contrib":"contribution","d.increases":"↑ raises risk","d.decreases":"↓ lowers risk",
             "d.risk":"Risk score","d.predclass":"Predicted class","d.threshold":"Operating threshold","d.flagged":"Flagged","d.notflagged":"Not flagged","d.inscope":"Scored (in triage scope)","d.outscope":"Triaged out (cheap power indicator judged it low-risk)","d.close":"Close","d.probs":"Class probabilities",
             "empty.jobs":"No jobs at this time","empty.nodes":"No node data at this time","empty.logs":"No events at this time","node.triaged":"Triaged (low-risk)","job.ended":"Ended","risk.low":"Low","risk.threshold":"threshold","node.showing":"Showing","node.of":"of","node.scoring":"scoring","node.band":"low-power band","node.anom":"anomalous","node.warn":"at-risk","job.showing":"Showing","job.rows":"rows (active / recently ended)",
-            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":"Download .md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl","report.why":"Fallback reason","report.advisory":"Advisory","report.draft":"Rejected draft (agent's own text)"
+            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":"Download .md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl","report.why":"Fallback reason","report.advisory":"Advisory","report.draft":"Rejected draft (agent's own text)",
+            "chart.section":"Charts (computed server-side)","chart.skipped":"Charts skipped",
+            "chart.predictionOutcomes.title":"P3 warning outcomes (flagged jobs)","chart.predictionOutcomes.sub":"The three segments sum to the flagged total. Missed failures are not in the ring — see the note below",
+            "chart.predictionOutcomes.missNote":"Missed failures were never flagged, so they are a different cohort and cannot be a slice of this ring",
+            "chart.failuresOverTime.title":"Failures over time (15-minute buckets)","chart.failuresOverTime.sub":"Bucketed by the time each job ended · resolution 15 minutes",
+            "chart.failuresOverTimeLines.title":"Failure trend (15-minute buckets)",
+            "chart.axis.binEnd":"Time (15-minute buckets)","chart.axis.failuresPerBin":"Failures per bucket",
+            "chart.legend.totalFailures":"Total",
+            "chart.cohort.endedInWindow":"Cohort: jobs that ended in this window, submitted at any time",
+            "chart.cohort.flagged":"Cohort: jobs flagged in this window",
+            "chart.jobOutcomeMix.title":"Job outcome mix","chart.jobOutcomeMix.sub":"Jobs that ended in this window, submitted at any time",
+            "chart.topFlaggedJobs.title":"Highest-risk flagged jobs","chart.topFlaggedJobs.sub":"In flight, at or above the alert threshold",
+            "chart.nodeRiskWatch.title":"Watch-list nodes by P2 risk","chart.nodeRiskWatch.sub":"Against the node alert threshold",
+            "chart.nodeContrib.title":"Why this node is flagged","chart.nodeContrib.sub":"Per-prediction feature contributions (log-odds)",
+            "chart.cat.caught":"Caught","chart.cat.falseAlarm":"False alarm","chart.cat.missed":"Missed","chart.cat.pending":"Pending (still running)",
+            "chart.cat.completed":"Completed","chart.cat.failed":"Failed","chart.cat.timeout":"Timeout","chart.cat.oom":"Out of memory",
+            "chart.legend.jobs":"Jobs","chart.legend.predictedRisk":"Predicted risk","chart.legend.p2Risk":"P2 risk","chart.legend.contribution":"Contribution",
+            "chart.axis.finalState":"Final state","chart.axis.riskPct":"Risk (%)","chart.axis.node":"Node","chart.axis.logOdds":"Contribution to risk (log-odds)",
+            "chart.ref.jobAlert":"Job alert threshold","chart.ref.nodeAlert":"Node alert threshold","chart.ref.zero":"Zero",
+            "mi.importance.h":"Global feature importance (model level)",
+            "mi.importance.p3.title":"P3 job-outcome model — global feature importance",
+            "mi.importance.p3.sub":"Measured across every prediction in the test set, not attributed to any single job",
+            "mi.importance.p3.metric":"Metric: permutation importance — the mean drop in test-set ROC-AUC when that feature's values are shuffled (averaged over 3 repeats). Larger means the model leans on it more.",
+            "mi.importance.p3.axis":"ROC-AUC drop when permuted",
+            "mi.importance.legend":"Importance",
+            "mi.importance.scope":"Scope: the whole model, across all predictions. This panel does not change with the virtual clock and says nothing about any individual job or node.",
+            "mi.importance.vsPerPrediction":"Not to be confused with “Why this node is flagged” in the shift report: that chart is a per-prediction attribution for ONE node in ONE 15-minute slot (signed log-odds contributions, different every slot). This panel is the model's average reliance overall — unsigned and fixed.",
+            "mi.importance.unavailable":"No global importance available"
           }
         };
         let lang = localStorage.getItem('lang') || 'zh';
@@ -430,7 +510,11 @@
         async function api(p,o){ const r=await fetch(p,o); if(!r.ok) throw new Error(p+' '+r.status); return r.json(); }
         const post = (p,b) => api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
 
-        function switchTab(id){ currentTab=id; document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active')); $('tab-'+id).classList.add('active'); $('nav-'+id).classList.add('active'); refresh(); }
+        function switchTab(id){ currentTab=id; document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active')); $('tab-'+id).classList.add('active'); $('nav-'+id).classList.add('active');
+            // the importance canvas is built at boot while this tab is display:none, so it measures
+            // zero; re-measure the moment it becomes visible rather than waiting on the observer
+            if(id==='policies') miChartInstances.forEach(c=>{ try{ c.resize(); }catch(e){} });
+            refresh(); }
 
         // ================= clock =================
         async function clockCmd(a,v){ try{ applyClock(await post('/api/clock',{action:a,value:v})); refresh(); }catch(e){console.error(e);} }
@@ -505,14 +589,293 @@
             document.getElementById('report-modal').classList.remove('hidden');
             const w=parseInt(document.getElementById('report-window').value||6);
             document.getElementById('report-body').innerHTML='<div class="text-slate-500 py-10 text-center">'+t('report.loading')+'</div>';
+            // drop the previous shift's charts while the new ones are being fetched, so a stale
+            // picture is never shown beside a fresh report
+            destroyCharts(); $('report-charts').classList.add('hidden'); $('report-charts-grid').innerHTML='';
             try{
                 const d=await api('/api/report?length=full&window='+w+'&lang='+lang);
                 reportData=d; renderReport(d);
             }catch(e){ document.getElementById('report-body').textContent='error: '+e; }
         }
+        // ================= report charts =================
+        // Contract with the backend: /api/report returns `charts`, an ordered list of fully
+        // computed charts (labels + datasets + colours + any reference line), and
+        // `charts_unavailable`, the ones that were selected but could not be drawn honestly.
+        // NOTHING is computed here. No value is hardcoded here. This code resolves label
+        // references through the existing I18N dictionary and hands the numbers to Chart.js.
+        const CHART_FONT = "'Noto Sans TC', sans-serif";
+        let chartInstances = [], chartToken = 0;
+        const escHtml = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+        // A label from the API is one of: {key} -> i18n lookup (switches with the toggle),
+        // {en,zh} -> a bilingual label that came from the database, {text} -> a literal id.
+        function labelText(l){
+            if(!l) return '';
+            if(l.key!=null) return t(l.key);
+            if(l[lang]!=null) return l[lang];
+            if(l.en!=null) return l.en;
+            return l.text!=null ? String(l.text) : '';
+        }
+        function destroyCharts(){
+            chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
+            chartInstances = [];
+        }
+        // Re-measure whenever the chart area's layout changes after the charts were built.
+        // This is not belt-and-braces, it is load-bearing: the full-width cards get their span from
+        // Tailwind's `md:col-span-2`, and the Play CDN generates that rule at RUNTIME via a mutation
+        // observer -- so at the instant Chart.js measures, a card destined to be 712 px wide is
+        // still 349 px and its canvas is sized to the wrong width. The same observer also covers the
+        // window being resized, and the md breakpoint being crossed, while the modal is open.
+        function observeChartArea(el, getInstances){
+            if(!el || !window.ResizeObserver || el._m100RO) return;
+            el._m100RO = new ResizeObserver(()=>{
+                getInstances().forEach(c=>{ try{ c.resize(); }catch(e){} });
+            });
+            el._m100RO.observe(el);
+        }
+        // The reference line is drawn on the canvas rather than as a dataset, so the value axis
+        // would not stretch to include it -- that is why the backend also sends `axis_max`.
+        if (window.Chart) {
+            Chart.defaults.color = '#94a3b8';
+            Chart.defaults.font.family = CHART_FONT;
+            Chart.defaults.font.size = 10;
+            Chart.register({
+                id:'m100RefLine',
+                afterDatasetsDraw(chart){
+                    const rl = (chart.options.plugins||{}).m100RefLine;
+                    if(!rl || rl.value==null) return;
+                    const horiz = chart.options.indexAxis === 'y';
+                    const sc = horiz ? chart.scales.x : chart.scales.y;
+                    if(!sc) return;
+                    const a = chart.chartArea, ctx = chart.ctx, p = sc.getPixelForValue(rl.value);
+                    const col = (rl.value === 0) ? 'rgba(148,163,184,0.55)' : 'rgba(244,63,94,0.85)';
+                    ctx.save();
+                    ctx.beginPath(); ctx.setLineDash([5,4]); ctx.lineWidth=1.5; ctx.strokeStyle=col;
+                    if(horiz){ ctx.moveTo(p,a.top); ctx.lineTo(p,a.bottom); }
+                    else      { ctx.moveTo(a.left,p); ctx.lineTo(a.right,p); }
+                    ctx.stroke(); ctx.setLineDash([]);
+                    if(rl.text){
+                        ctx.fillStyle=col; ctx.font='10px '+CHART_FONT;
+                        if(horiz){ ctx.textAlign='center';
+                                   ctx.fillText(rl.text, Math.min(a.right-24, Math.max(a.left+24,p)), a.top+9); }
+                        else     { ctx.textAlign='right';
+                                   ctx.fillText(rl.text, a.right-4, Math.max(a.top+9, p-4)); }
+                    }
+                    ctx.restore();
+                }
+            });
+        }
+        function buildChart(canvas, c){
+            const horiz   = (c.type==='hbar' || c.type==='signed_hbar');
+            const isLine  = (c.type==='line');
+            const stacked = (c.type==='stacked_bar');
+            const kind    = (c.type==='doughnut') ? 'doughnut' : (isLine ? 'line' : 'bar');
+            const multi   = (c.datasets||[]).length > 1;      // needs a dataset legend
+            const notes   = (c.point_notes||[]).map(labelText);
+            const sfx     = c.value_suffix || '';
+            const grid    = 'rgba(148,163,184,0.12)';
+            const valueAxis = {
+                beginAtZero:true, stacked:stacked, grid:{color:grid}, border:{display:false},
+                ticks:{ callback:v=>v+sfx, precision:0 }
+            };
+            if(c.axis_max!=null) valueAxis.suggestedMax = c.axis_max;
+            // Category axis. Every data point is plotted; when the bucket count grows the LABELS
+            // thin out (autoSkip), never the data. maxTicksLimit is a count of labels, not of
+            // points, so this scales to any number of buckets without further tuning.
+            const catAxis = {
+                stacked:stacked, grid:{display:false}, border:{display:false},
+                ticks:{ autoSkip:true, maxTicksLimit:(horiz?12:10), maxRotation:0, minRotation:0 }
+            };
+            const axX = labelText(c.axis_x), axY = labelText(c.axis_y);
+            if(horiz){ if(axX) valueAxis.title={display:true,text:axX};
+                       if(axY) catAxis.title={display:true,text:axY}; }
+            else     { if(axY) valueAxis.title={display:true,text:axY};
+                       if(axX) catAxis.title={display:true,text:axX}; }
+
+            const cfg = {
+                type: kind,
+                data: {
+                    labels: (c.labels||[]).map(labelText),
+                    datasets: (c.datasets||[]).map(ds=>{
+                        const st = ds.style || {};
+                        const col = ds.colors || ds.color;
+                        const base = { label: labelText(ds.legend), data: ds.data };
+                        if(isLine){
+                            return Object.assign(base, {
+                                borderColor: ds.color, backgroundColor: ds.color,
+                                borderWidth: (st.line_width!=null?st.line_width:2),
+                                // straight segments: these are counts in discrete buckets, and any
+                                // curve would draw values between them that do not exist
+                                tension: (st.tension!=null?st.tension:0),
+                                pointRadius: (st.point_radius!=null?st.point_radius:3),
+                                pointHoverRadius: (st.point_radius!=null?st.point_radius+2:5),
+                                pointBackgroundColor: ds.color,
+                                order: (st.order!=null?st.order:1),
+                                fill:false, spanGaps:false
+                            });
+                        }
+                        return Object.assign(base, {
+                            backgroundColor: col,
+                            borderColor: (kind==='doughnut') ? 'rgba(5,11,20,0.85)' : col,
+                            borderWidth: (kind==='doughnut') ? 2 : 0,
+                            borderRadius: (kind==='doughnut') ? 0 : (stacked?0:3),
+                            maxBarThickness: stacked ? 40 : 24
+                        });
+                    })
+                },
+                options: {
+                    indexAxis: horiz ? 'y' : 'x',
+                    responsive:true, maintainAspectRatio:false, animation:false,
+                    interaction: isLine ? {mode:'index', intersect:false} : undefined,
+                    layout:{ padding:{ top: (c.reference_line?12:2), right:6 } },
+                    plugins:{
+                        legend:{ display: (kind==='doughnut' || multi), position:'bottom',
+                                 labels:{ boxWidth:10, boxHeight:10, padding:8, usePointStyle:true } },
+                        tooltip:{
+                            backgroundColor:'rgba(15,23,42,0.95)', borderColor:'rgba(56,189,248,0.3)',
+                            borderWidth:1, padding:8, displayColors:multi,
+                            callbacks:{ label(ctx){
+                                const v = (kind==='doughnut') ? ctx.parsed
+                                                              : ctx.parsed[horiz ? 'x' : 'y'];
+                                const n = notes[ctx.dataIndex];
+                                const who = multi ? (ctx.dataset.label + ': ') : '';
+                                return ' ' + who + v + sfx + (n ? '  ·  ' + n : '');
+                            }}
+                        },
+                        m100RefLine: c.reference_line
+                            ? { value:c.reference_line.value, text:labelText(c.reference_line.label) }
+                            : null
+                    },
+                    scales: (kind==='doughnut') ? {}
+                          : (horiz ? { x: valueAxis, y: catAxis }
+                                   : { x: catAxis,   y: valueAxis })
+                }
+            };
+            return new Chart(canvas.getContext('2d'), cfg);
+        }
+        function renderCharts(d){
+            destroyCharts();
+            const token = ++chartToken;     // a newer render must win over a pending frame
+            const wrap=$('report-charts'), head=$('report-charts-head'),
+                  grid=$('report-charts-grid'), skip=$('report-charts-skipped');
+            const list = d.charts || [], gone = d.charts_unavailable || [];
+            grid.innerHTML=''; skip.innerHTML='';
+
+            if(!list.length && !gone.length){
+                wrap.classList.add('hidden'); head.classList.add('hidden'); skip.classList.add('hidden');
+                return;
+            }
+            wrap.classList.remove('hidden');
+
+            // heading + grid only when there is actually something drawn -- an empty titled panel
+            // is worse than no panel
+            if(list.length){
+                head.classList.remove('hidden');
+                $('report-charts-title').textContent = t('chart.section');
+            } else {
+                head.classList.add('hidden');
+            }
+
+            // LAYOUT comes from the server's per-chart width hint ("half" | "full"), never from the
+            // chart type guessed here. A trailing unpaired half is promoted to full so the grid
+            // never ends with a visible empty cell -- that hole is what an odd chart count used to
+            // leave behind. Order is preserved exactly as the API returned it, which is what keeps
+            // the failures-over-time bar and line versions side by side.
+            // Walk the row simulation: a full-width item cannot start in column 2, so the browser
+            // pushes it to the next row and leaves column 2 of the current row empty. Both that
+            // case and a trailing lone half are fixed the same way -- promote the stranded half to
+            // full so it fills its own row.
+            const spans = list.map(c => (c.width === 'full') ? 2 : 1);
+            let col = 0, lastHalf = -1;
+            for(let i=0;i<spans.length;i++){
+                if(spans[i]===2){
+                    if(col===1 && lastHalf>=0) spans[lastHalf]=2;   // fill the hole it would leave
+                    col = 0;
+                } else {
+                    lastHalf = i;
+                    col = (col+1) % 2;
+                }
+            }
+            if(col===1 && lastHalf>=0) spans[lastHalf]=2;           // trailing lone half
+
+            list.forEach((c, i)=>{
+                const n = ((c.datasets && c.datasets[0] && c.datasets[0].data) || []).length;
+                const tall = (c.type==='hbar' || c.type==='signed_hbar');
+                const series = (c.type==='line' || c.type==='stacked_bar');
+                const h = tall ? Math.max(170, 26*n + 70)
+                               : (series ? 260 : (c.type==='doughnut' ? 210 : 200));
+                const card = document.createElement('div');
+                card.className = 'border border-slate-700/50 rounded-lg p-3 bg-slate-900/40'
+                               + (spans[i]===2 ? ' md:col-span-2' : '');
+                // an optional swatch legend for per-bar colouring, which Chart.js's dataset legend
+                // cannot express without inventing one fake dataset per colour
+                const swatches = (c.color_legend||[]).map(s =>
+                    '<span class="inline-flex items-center gap-1 mr-3">'
+                  + '<span style="width:8px;height:8px;border-radius:2px;background:'
+                  + escHtml(s.color) + ';display:inline-block"></span>'
+                  + escHtml(labelText(s.label)) + '</span>').join('');
+                const foot = c.footnote
+                  ? '<div class="text-[10px] text-slate-400 mt-1.5 pt-1.5 border-t border-slate-700/40">'
+                      + '<span class="text-rose-400 font-bold">' + escHtml(labelText(c.footnote.label))
+                      + ': ' + escHtml(String(c.footnote.value)) + '</span>'
+                      + (c.footnote.note ? ' <span class="text-slate-500">— '
+                          + escHtml(labelText(c.footnote.note)) + '</span>' : '')
+                    + '</div>'
+                  : '';
+                const cohort = c.cohort_note
+                  ? '<div class="text-[10px] text-slate-500 mt-1">'
+                      + escHtml(labelText(c.cohort_note)) + '</div>'
+                  : '';
+                card.innerHTML =
+                    '<div class="text-xs font-bold text-slate-200">'
+                        + escHtml(labelText(c.title) + (c.title_suffix||'')) + '</div>'
+                  + '<div class="text-[10px] text-slate-500 mb-2">'
+                        + escHtml(labelText(c.subtitle)) + '</div>'
+                  + (swatches ? '<div class="text-[10px] text-slate-400 mb-1">'+swatches+'</div>' : '')
+                  + '<div style="height:' + h + 'px"><canvas id="rc-' + i + '"></canvas></div>'
+                  + foot
+                  + '<p class="text-[11px] text-slate-400 mt-2 leading-relaxed">'
+                        + escHtml(c.caption||'') + '</p>'
+                  + cohort;
+                grid.appendChild(card);
+            });
+            // Chart.js sizes a responsive canvas from its container at construction time, and the
+            // grid's column widths are not resolved in the tick the cards are appended: measured
+            // then, the container reports its explicit height but a width of 0 and every canvas
+            // collapses. Reading offsetWidth forces the pending layout to flush first. The resize()
+            // afterwards is the belt to that braces -- it re-measures a canvas that still came out
+            // zero-width, which is cheap and covers a container that settles late (fonts, scrollbar).
+            void grid.offsetWidth;
+            list.forEach((c, i)=>{
+                const cv = document.getElementById('rc-'+i);
+                if(!cv) return;
+                try {
+                    const inst = buildChart(cv, c);
+                    chartInstances.push(inst);
+                    if(!cv.clientWidth) inst.resize();
+                } catch(e){ console.error(e); }
+            });
+            // ...and once more on the next frame for the case where the panel is only laid out then
+            // (a hidden tab never fires this, but a hidden tab has nothing to show either).
+            requestAnimationFrame(()=>{
+                if(token !== chartToken) return;
+                chartInstances.forEach(inst=>{ try{ inst.resize(); }catch(e){} });
+            });
+            observeChartArea(grid, ()=>chartInstances);
+
+            if(gone.length){
+                skip.innerHTML = '<span class="text-slate-400">'+escHtml(t('chart.skipped'))+':</span> '
+                    + gone.map(u=>escHtml(u.chart_id)+' — '+escHtml(u.reason||u.code||'')).join('<br>');
+                skip.classList.remove('hidden');
+            } else {
+                skip.classList.add('hidden');
+            }
+        }
+
         function renderReport(d){
             reportData=d;
             document.getElementById('report-body').innerHTML=mdToHtml(d.text);
+            renderCharts(d);
             document.getElementById('report-facts').textContent=JSON.stringify(d.facts,null,2);
             document.getElementById('report-genat').textContent=d.generated_iso+(d.cached?' (cached)':'');
             const b=document.getElementById('report-mode'); b.className='text-[10px] px-2 py-0.5 rounded border whitespace-nowrap';
@@ -699,6 +1062,54 @@
               + `<div class="text-xs"><b class="text-slate-300">${en?'Fields not in this dataset (what data would we need):':'未收集之欄位 (需要什麼資料)：'}</b><ul class="list-disc ml-5 mt-1 space-y-0.5 text-slate-400">${na}</ul></div>`
               + `<div class="text-xs"><b class="text-slate-300">${en?'Proxied fields:':'Proxy 代理欄位：'}</b><ul class="list-disc ml-5 mt-1 text-slate-400">${px}</ul></div>`
               + `<div class="text-[11px] text-slate-500 pt-1">${mi.hardware_note}</div>`;
+            renderImportancePanels(mi);
+        }
+
+        // ---- model-level global importance (static; NOT an agent-selectable report chart) -------
+        let miChartInstances = [];
+        function renderImportancePanels(mi){
+            miChartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
+            miChartInstances = [];
+            const wrap=$('mi-importance'), gridEl=$('mi-importance-grid'), miss=$('mi-importance-missing');
+            const panels = mi.importance_panels || [], gone = mi.importance_unavailable || [];
+            gridEl.innerHTML='';
+            if(!panels.length && !gone.length){ wrap.classList.add('hidden'); return; }
+            wrap.classList.remove('hidden');
+            $('mi-importance-h').textContent   = t('mi.importance.h');
+            $('mi-importance-scope').textContent = t('mi.importance.scope');
+            // the wording that keeps this apart from the per-prediction chart in the report
+            $('mi-importance-vs').textContent  = t('mi.importance.vsPerPrediction');
+
+            panels.forEach((p,i)=>{
+                const n=((p.datasets&&p.datasets[0]&&p.datasets[0].data)||[]).length;
+                const card=document.createElement('div');
+                card.className='border border-slate-700/40 rounded-lg p-3 bg-slate-900/40';
+                card.innerHTML =
+                    '<div class="text-xs font-bold text-slate-200">'+escHtml(labelText(p.title))+'</div>'
+                  + '<div class="text-[10px] text-slate-500 mb-2">'+escHtml(labelText(p.subtitle))+'</div>'
+                  + '<div style="height:'+Math.max(200, 24*n+70)+'px"><canvas id="mic-'+i+'"></canvas></div>'
+                  + '<p class="text-[10px] text-slate-400 mt-2 leading-relaxed">'
+                      + escHtml(labelText(p.metric_note))+'</p>';
+                gridEl.appendChild(card);
+            });
+            void gridEl.offsetWidth;
+            panels.forEach((p,i)=>{
+                const cv=document.getElementById('mic-'+i);
+                if(!cv) return;
+                try{
+                    const inst=buildChart(cv,p);
+                    miChartInstances.push(inst);
+                    if(!cv.clientWidth) inst.resize();
+                }catch(e){ console.error(e); }
+            });
+            observeChartArea(gridEl, ()=>miChartInstances);
+
+            if(gone.length){
+                miss.innerHTML = gone.map(u =>
+                    escHtml(u.model_id)+' — '+escHtml(t('mi.importance.unavailable'))
+                    + ': '+escHtml(u.reason||u.code||'')).join('<br>');
+                miss.classList.remove('hidden');
+            } else { miss.classList.add('hidden'); }
         }
 
         // ================= boot =================

@@ -78,16 +78,23 @@ def main():
             jw, cn = facts["jobs_window"], facts["cluster_now"]
             if length == "brief":
                 return (f"Last {facts['window']['hours']} h: {jw['submitted']} jobs submitted, "
-                        f"{jw['ended']} ended, {jw['ended_completed']} completed. "
+                        f"{jw['ended_in_window']} ended, {jw['ended_in_window_completed']} completed. "
                         f"{cn['active_jobs']} active now."), None
             return json.dumps({
                 "executive_summary": f"Over the last {facts['window']['hours']} h the cluster "
-                                     f"submitted {jw['submitted']} jobs and {jw['ended']} ended, of "
-                                     f"which {jw['ended_completed']} completed. "
+                                     f"submitted {jw['submitted']} jobs and {jw['ended_in_window']} "
+                                     f"ended, of which {jw['ended_in_window_completed']} completed. "
                                      f"{cn['active_jobs']} jobs are active.",
                 "risk_assessment":   f"{facts['node_onsets']['count']} node anomaly onsets were "
                                      f"detected in the window.",
                 "action_playbook":   ["Review the flagged jobs before the next shift."],
+                # the new contract: ids from the enum plus a caption, no data
+                "chart_configs": [
+                    {"chart_id": "prediction_outcomes",
+                     "caption": "How the jobs flagged this window actually turned out."},
+                    {"chart_id": "job_outcome_mix",
+                     "caption": "Final states of the jobs that ended during the window."},
+                ],
             }, ensure_ascii=False), None
         report.generate_llm = _mock
 
