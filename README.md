@@ -335,6 +335,50 @@ Axis labels, legends, category names and reference-line labels travel as i18n **
 (`{"key": …}`), or as bilingual pairs when they come from the database (`{"en": …, "zh": …}`), so the
 EN/中文 toggle relabels a chart without a second API call. Captions come from the API as-is.
 
+### The second agent (Data Auditor) — advisory, and structurally unable to block
+
+A second LaplaceAI agent reviews the narrative against the facts. It is **advisory only**: it never
+blocks, never changes `mode`, and never decides whether a report is served. A dead, slow or
+cooling-down auditor degrades to a normal report carrying an advisory flag.
+
+Both agents now go through **one** resilient path, `invoke_agent()` — retry with jittered backoff,
+error-class-aware handling, and a circuit breaker — with a per-agent profile (the narrator gets 3
+attempts / 150 s; the advisory auditor gets 2 / 75 s). **Cooldown is namespaced per agent**
+(`_COOLDOWN[agent]`, not one module-level scalar). That separation is mandatory rather than tidy:
+routing the auditor through the shared wrapper means it now trips the breaker on failure, and with
+one shared scalar an auditor outage would have put the *narrator* into cooldown and turned every
+subsequent report into a template.
+
+**The auditor sees the identical trimmed payload the narrator saw** —
+`trim_facts_for_prompt(facts, lang)`, byte for byte. That is deliberate: an auditor shown *less*
+than the writer can flag a true statement as unsupported purely because the supporting field was
+withheld. Feeding it the same bytes makes that false-flag case impossible by construction rather
+than by careful field-picking. Excluded relative to the full facts (and therefore invisible to the
+narrator too): `window.start_ts/end_ts`, `cluster_now.nodes_scored`, example arrays capped at 2,
+list sections capped at 4, and the other language's caveat.
+
+**It runs only where it can pay for itself**: after the hard gate, only for `mode == "llm"`, only for
+`length == "full"`, and only inside `REPORT_TIME_BUDGET`. Auditing a draft the numeric gate is about
+to discard spends a call on text nobody reads, and the brief report is polled every ~12 s.
+
+**Its state is visible rather than implied.** Every failure used to return `is_valid: True`, so a
+100 %-dead auditor was indistinguishable from one that had read the report and approved it. The
+response now carries an `auditor` block (`ran`, `state`, `is_valid`, `reason`, `latency_s`,
+`advisory_code`) and each outcome has its own advisory code: `auditor_flag`,
+`auditor_no_credentials`, `auditor_failed`, `auditor_timeout`, `auditor_cooldown`,
+`auditor_unparseable`, `auditor_skipped_budget`.
+
+`REPORT_AUDIT=0` disables the second agent entirely without touching its credentials; the
+verification suites that are not about it set this so they can never make a live call.
+
+### Debugging outbound agent calls
+
+`LAPLACE_DEBUG=1` turns on an outbound-call log — agent, endpoint host+path, payload bytes, latency,
+HTTP status, exception class — printed as `[llm.call]` lines and served by
+`GET /api/debug/llm_calls` alongside each agent's cooldown. **Off by default**; when off, nothing is
+recorded and nothing is computed. Bearer secrets are never recorded and query strings are replaced
+with `?<redacted>`.
+
 ### Endpoint resilience, and the pre-demo prewarm
 
 A LaplaceAI **504** is a gateway timeout on *their* side — the agent exceeded its internal limit, so
@@ -404,6 +448,7 @@ printed to a cp1252 console.
 | `verify_narration.py` | reply-shape post-processing (JSON contract, plain markdown, meta-commentary) |
 | `verify_fallback.py` | `fallback_reason` wording, caching policy, circuit breaker |
 | `verify_resilience.py` | retries, error-class cooldowns, prompt trimming, secret hygiene |
+| `verify_auditor.py` | the second agent is advisory: timeout / 504 / 429 / malformed JSON / disagreement / no credentials all still serve the report with `mode` unchanged and the right advisory code; the auditor is skipped for `brief` and for gate-rejected drafts; an auditor failure never cools down the narrator |
 
 ## Deployment (Render, free tier, native Python — no Docker)
 

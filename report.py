@@ -22,6 +22,17 @@ from charts import ChartId
 NODE_WATCH   = 0.30                                   # in-scope P2 score >= this = "on watch"
 MAX_EX       = 4                                      # example IDs per outcome bucket
 MAX_CHARTS   = 4                                      # cap on how many charts the AGENT may select
+
+# Total wall-clock a single /api/report may spend on outbound agent calls. The narrator owns most of
+# it (its own deadline is 150s); whatever is left is what the advisory auditor may use, and if that
+# is too little the audit is skipped with a flag rather than extending a request the user is waiting
+# on. Measured on this endpoint: a successful narration takes 58-61s, a successful audit 19-35s.
+REPORT_TIME_BUDGET = 210.0
+
+def audit_enabled() -> bool:
+    """The auditor can be switched off entirely without unsetting its credentials.
+    Defaults ON; set REPORT_AUDIT=0 to disable (used by the verification scripts)."""
+    return str(os.environ.get("REPORT_AUDIT", "1")).strip().lower() not in ("0", "false", "no", "off")
 REPORT_MODEL = os.environ.get("REPORT_MODEL", "claude-haiku-4-5-20251001")
 CACHE_TTL    = 120                                    # real seconds an entry stays valid
 CACHE_BUCKET = 900                                    # virtual seconds per cache bucket (15 virtual min)
@@ -757,18 +768,107 @@ COOLDOWN_CLIENT    = 600    # other 4xx: the request is malformed, retrying is p
 TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504}
 AUTH_STATUS      = {401, 403}
 
-_LLM_COOLDOWN = 0.0          # skip the LLM until this real time
-_LLM_COOLDOWN_WHY = ""       # why we are cooling down, so the UI can say so precisely
+# ---- agents -------------------------------------------------------------------------------------
+AGENT_MAIN    = "main"       # narrates the facts; its output IS the report
+AGENT_AUDITOR = "auditor"    # advisory second opinion; never blocks, never changes `mode`
+
+# Per-agent resilience profile. The auditor is advisory, so it gets a tighter budget: fewer
+# attempts and a shorter deadline than the narrator, because a slow audit is worth less than a
+# fast report. Its per-attempt timeout is nevertheless GENEROUS, and deliberately so -- see the
+# note on AUDIT_TIMEOUT below.
+AGENT_PROFILE = {
+    AGENT_MAIN:    {"attempts": RETRY_ATTEMPTS, "deadline": RETRY_DEADLINE,
+                    "timeout": REQUEST_TIMEOUT, "min_room": MIN_ATTEMPT_ROOM},
+    AGENT_AUDITOR: {"attempts": 2, "deadline": 75.0, "timeout": 60.0, "min_room": 10.0},
+}
+
+# ---- cooldown, namespaced PER AGENT ---------------------------------------------------------------
+# This was a single module-level scalar. It is now keyed by agent, and that separation is not
+# cosmetic: the fix routes the auditor through the same wrapper as the narrator, and that wrapper
+# TRIPS THE BREAKER on failure. With one shared scalar, an auditor that fails -- which, measured, it
+# did on every call for a while -- would have put the narrator into cooldown and turned every
+# subsequent report into a template. Each agent now cools down only itself.
+_COOLDOWN = {}               # agent -> (until_epoch, why)
+
+def cooldown_remaining(agent: str):
+    """-> (seconds_remaining, why). (0.0, "") when the agent is not cooling down."""
+    until, why = _COOLDOWN.get(agent, (0.0, ""))
+    return max(0.0, until - time.time()), why
+
+def clear_cooldowns():
+    """Drop every agent's cooldown. Used by the verification scripts between fixtures."""
+    _COOLDOWN.clear()
 
 def _log(msg: str):
     """Attempt-level logging. Never receives the bearer secret -- callers pass status/class only."""
     print(f"[report.llm] {msg}", flush=True)
 
-def _cooldown(seconds: int, why: str):
-    global _LLM_COOLDOWN, _LLM_COOLDOWN_WHY
-    _LLM_COOLDOWN = time.time() + seconds
-    _LLM_COOLDOWN_WHY = why
-    _log(f"cooldown {seconds}s after {why}")
+
+# ---------------------------------------------------------------- outbound-call instrumentation
+# OFF unless LAPLACE_DEBUG is set to something other than 0/false. When on, every outbound LaplaceAI
+# call records agent, host, path, payload size, wall-clock latency, status and exception class, both
+# to stdout and to an in-memory ring the /api/debug/llm_calls route can serve.
+# The bearer secret is NEVER recorded: only the URL host and path are kept, and any query string is
+# replaced with a marker rather than stored.
+CALL_LOG_MAX = 200
+_CALL_LOG = []
+_CALL_LOG_LOCK = threading.Lock()
+
+def debug_on() -> bool:
+    return str(os.environ.get("LAPLACE_DEBUG", "")).strip().lower() not in ("", "0", "false", "no")
+
+def _redact_url(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(url or "")
+        return f"{u.netloc}{u.path}" + ("?<redacted>" if u.query else "")
+    except Exception:
+        return "<unparseable-url>"
+
+def _resp_note(r) -> str:
+    """A cheap, TOTALLY SAFE description of a response body for the call log.
+
+    Instrumentation must never be able to break the thing it observes: this returns "" when
+    debugging is off (so nothing is computed at all) and swallows anything odd about the object it
+    is handed, because that object may be a test double rather than a real requests.Response.
+    """
+    if not debug_on():
+        return ""
+    try:
+        return f"resp={len(getattr(r, 'content', b'') or b'')}b"
+    except Exception:
+        return ""
+
+def record_call(agent, url, payload_bytes, latency_s, status, exc=None, note=""):
+    """One outbound call, recorded. Cheap no-op when debugging is off, and never raises."""
+    if not debug_on():
+        return
+    row = {"ts": round(time.time(), 3), "agent": agent, "endpoint": _redact_url(url),
+           "payload_bytes": int(payload_bytes or 0), "latency_s": round(float(latency_s), 2),
+           "status": status, "exception": (type(exc).__name__ if exc is not None else None),
+           "note": note}
+    try:
+        with _CALL_LOG_LOCK:
+            _CALL_LOG.append(row)
+            if len(_CALL_LOG) > CALL_LOG_MAX:
+                del _CALL_LOG[: len(_CALL_LOG) - CALL_LOG_MAX]
+        print(f"[llm.call] agent={row['agent']:<7} {row['endpoint']:<58} "
+              f"bytes={row['payload_bytes']:>7} {row['latency_s']:>7.2f}s "
+              f"status={row['status']} exc={row['exception']} {row['note']}", flush=True)
+    except Exception:
+        pass          # a broken log line must never fail a report
+
+def call_log(limit: int = 100) -> list:
+    with _CALL_LOG_LOCK:
+        return list(_CALL_LOG[-int(limit):])
+
+def clear_call_log():
+    with _CALL_LOG_LOCK:
+        _CALL_LOG.clear()
+
+def _cooldown(seconds: int, why: str, agent: str = AGENT_MAIN):
+    _COOLDOWN[agent] = (time.time() + seconds, why)
+    _log(f"[{agent}] cooldown {seconds}s after {why}")
 
 def _extract_text(res_data):
     """Pull the narration out of the LaplaceAI payload shape."""
@@ -909,22 +1009,30 @@ def _build_prompt(payload: dict, lang: str, length: str) -> str:
     )
 
 
-def _attempt(invoke_url, bearer_secret, prompt, timeout):
+def _attempt(invoke_url, bearer_secret, prompt, timeout, agent="main"):
     """One HTTP attempt. -> (text, err_class, detail, status)
 
     err_class is None on success, else one of 'transient' | 'auth' | 'client' | 'shape'.
+    `agent` is a label for the call log only; it never changes behaviour.
     """
     headers = {"Authorization": f"Bearer {bearer_secret}", "Content-Type": "application/json"}
+    body = {"message": prompt}
+    nbytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    t0 = time.time()
     try:
-        r = requests.post(invoke_url, headers=headers, json={"message": prompt}, timeout=timeout)
-    except requests.exceptions.Timeout:
+        r = requests.post(invoke_url, headers=headers, json=body, timeout=timeout)
+    except requests.exceptions.Timeout as e:
+        record_call(agent, invoke_url, nbytes, time.time() - t0, None, e, f"timeout={timeout:.0f}s")
         return None, "transient", "read timeout", None
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.ConnectionError as e:
+        record_call(agent, invoke_url, nbytes, time.time() - t0, None, e)
         return None, "transient", "could not connect to endpoint", None
     except Exception as e:
+        record_call(agent, invoke_url, nbytes, time.time() - t0, None, e)
         return None, "transient", f"request failed ({type(e).__name__})", None
 
     sc = r.status_code
+    record_call(agent, invoke_url, nbytes, time.time() - t0, sc, None, _resp_note(r))
     if sc == 200:
         try:
             data = r.json()
@@ -952,20 +1060,44 @@ def generate_llm(facts: dict, lang: str, length: str):
     with jitter, bounded by RETRY_DEADLINE seconds of total elapsed time. Auth and malformed-request
     failures are NOT retried -- they are configuration errors and retrying only wastes the budget.
     """
-    invoke_url = os.environ.get("LAPLACE_INVOKE_URL")
-    bearer_secret = os.environ.get("LAPLACE_BEARER_SECRET")
+    prompt = _build_prompt(trim_facts_for_prompt(facts, lang), lang, length)
+    text, reason, _err = invoke_agent(AGENT_MAIN, "LAPLACE_INVOKE_URL", "LAPLACE_BEARER_SECRET",
+                                      prompt)
+    return text, reason
+
+
+def invoke_agent(agent, url_env, secret_env, prompt, budget_left=None):
+    """The ONE resilient outbound path. Both agents go through it. -> (text, reason, err_class).
+
+    Retries transient failures with exponential backoff and jitter, bounded by the agent's deadline;
+    does NOT retry auth or malformed-request failures, which are configuration errors that retrying
+    only wastes budget on. Trips that AGENT'S cooldown -- never another's.
+
+    `budget_left`, when given, further caps the deadline: the caller may have already spent most of
+    the request's total time budget, and an advisory call must not extend a request the user is
+    waiting on.
+    """
+    p = AGENT_PROFILE.get(agent, AGENT_PROFILE[AGENT_MAIN])
+    attempts, deadline = p["attempts"], p["deadline"]
+    per_timeout, min_room = p["timeout"], p["min_room"]
+    if budget_left is not None:
+        deadline = min(deadline, max(0.0, float(budget_left)))
+
+    invoke_url = os.environ.get(url_env)
+    bearer_secret = os.environ.get(secret_env)
 
     # env first, cooldown second, so an active cooldown is never mistaken for a missing key
     if not invoke_url:
-        return None, "LAPLACE_INVOKE_URL not set"
+        return None, f"{url_env} not set", "no_credentials"
     if not bearer_secret:
-        return None, "LAPLACE_BEARER_SECRET not set"
-    remain = _LLM_COOLDOWN - time.time()
+        return None, f"{secret_env} not set", "no_credentials"
+    remain, why = cooldown_remaining(agent)
     if remain > 0:
-        why = _LLM_COOLDOWN_WHY or "an earlier failure"
-        return None, f"endpoint cooling down after {why} ({int(remain) + 1}s remaining)"
-
-    prompt = _build_prompt(trim_facts_for_prompt(facts, lang), lang, length)
+        return None, (f"endpoint cooling down after {why or 'an earlier failure'} "
+                      f"({int(remain) + 1}s remaining)"), "cooldown"
+    if deadline < min_room:
+        return None, (f"only {deadline:.0f}s of the request budget left, less than the "
+                      f"{min_room:.0f}s needed for one attempt"), "no_budget"
 
     def cause_label(detail, sc):
         """Short noun phrase for the cooldown message: 'HTTP 504', 'a read timeout', ..."""
@@ -973,45 +1105,155 @@ def generate_llm(facts: dict, lang: str, length: str):
         return "a read timeout" if "timeout" in (detail or "") else "a connection failure"
 
     started = time.time()
-    last_detail, last_sc = "endpoint unavailable", None
-    for i in range(1, RETRY_ATTEMPTS + 1):
-        left = RETRY_DEADLINE - (time.time() - started)
-        if i > 1 and left < MIN_ATTEMPT_ROOM:
-            _log(f"attempt {i} skipped: only {left:.0f}s of the {RETRY_DEADLINE:.0f}s budget left")
+    last_detail, last_sc, last_err = "endpoint unavailable", None, "transient"
+    for i in range(1, attempts + 1):
+        left = deadline - (time.time() - started)
+        if i > 1 and left < min_room:
+            _log(f"[{agent}] attempt {i} skipped: only {left:.0f}s of the {deadline:.0f}s budget left")
             break
         text, err, detail, sc = _attempt(invoke_url, bearer_secret, prompt,
-                                         min(REQUEST_TIMEOUT, max(left, MIN_ATTEMPT_ROOM)))
+                                         min(per_timeout, max(left, min_room)), agent=agent)
         if err is None:
-            _log(f"attempt {i}/{RETRY_ATTEMPTS} ok (HTTP 200, {time.time()-started:.1f}s)")
-            return text, None
-        last_detail, last_sc = detail, sc
-        _log(f"attempt {i}/{RETRY_ATTEMPTS} failed: {detail} [class={err}]")
+            _log(f"[{agent}] attempt {i}/{attempts} ok (HTTP 200, {time.time()-started:.1f}s)")
+            return text, None, None
+        last_detail, last_sc, last_err = detail, sc, err
+        _log(f"[{agent}] attempt {i}/{attempts} failed: {detail} [class={err}]")
 
         if err == "auth":
-            _cooldown(COOLDOWN_AUTH, f"HTTP {sc}")
-            return None, (f"{detail} -- check LAPLACE_BEARER_SECRET; not retried and paused for "
-                          f"{COOLDOWN_AUTH // 60} minutes")
+            _cooldown(COOLDOWN_AUTH, f"HTTP {sc}", agent)
+            return None, (f"{detail} -- check {secret_env}; not retried and paused for "
+                          f"{COOLDOWN_AUTH // 60} minutes"), "auth"
         if err == "client":
-            _cooldown(COOLDOWN_CLIENT, f"HTTP {sc}")
-            return None, f"{detail} -- request rejected as malformed; not retried"
+            _cooldown(COOLDOWN_CLIENT, f"HTTP {sc}", agent)
+            return None, f"{detail} -- request rejected as malformed; not retried", "client"
         if err == "shape":
             # the endpoint is up and answered 200: do not trip the breaker, do not retry
-            return None, detail
+            return None, detail, "shape"
 
-        if i < RETRY_ATTEMPTS:                       # transient -> back off and try again
+        if i < attempts:                             # transient -> back off and try again
             delay = RETRY_BASE * (2 ** (i - 1))
             delay *= 0.75 + random.random() * 0.5    # +/-25% jitter
-            if (time.time() - started) + delay + MIN_ATTEMPT_ROOM > RETRY_DEADLINE:
-                _log("backoff would exceed the retry deadline; giving up")
+            if (time.time() - started) + delay + min_room > deadline:
+                _log(f"[{agent}] backoff would exceed the retry deadline; giving up")
                 break
-            _log(f"backing off {delay:.1f}s before attempt {i + 1}")
+            _log(f"[{agent}] backing off {delay:.1f}s before attempt {i + 1}")
             time.sleep(delay)
 
-    tried = min(i, RETRY_ATTEMPTS)
-    _cooldown(COOLDOWN_TRANSIENT, cause_label(last_detail, last_sc))
-    return None, f"{last_detail} after {tried} attempt{'' if tried == 1 else 's'}"
+    tried = min(i, attempts)
+    _cooldown(COOLDOWN_TRANSIENT, cause_label(last_detail, last_sc), agent)
+    is_timeout = last_sc is None and "timeout" in (last_detail or "")
+    return (None, f"{last_detail} after {tried} attempt{'' if tried == 1 else 's'}",
+            "timeout" if is_timeout else last_err)
 
 
+# ================================================================================================
+# 3.5  DATA AUDITOR (agent 2) -- ADVISORY ONLY
+#
+# Contract, and every word of it is load-bearing: the auditor never blocks, never changes `mode`,
+# and never decides whether a report is served. A dead, slow or cooling-down auditor degrades to a
+# normal report carrying an advisory flag. It is a second opinion, not a gate.
+#
+# WHY THE PAYLOAD IS THE SAME TRIMMED VIEW THE NARRATOR SAW.
+# The auditor is asked "does this narrative match the facts?". If it is shown LESS than the narrator
+# was, it can flag a true statement as unsupported simply because the supporting field was withheld
+# -- a false audit flag, which is worse than no audit. So the payload is literally
+# trim_facts_for_prompt(facts, lang): the identical bytes the narrator was given. That makes the
+# false-flag case impossible by construction rather than by careful field-picking, because every
+# claim the narrator could possibly have made traces to something in this payload.
+# What that excludes, relative to the full facts: window.start_ts/end_ts (epoch ints; the prose uses
+# the ISO forms), cluster_now.nodes_scored (referenced by no report section), outcome-example arrays
+# capped at 2 and list sections at 4, and the other language's caveat string. None of those can
+# appear in the narrative, because the narrator never saw them either.
+#
+# WHY THE TIMEOUT IS 60s AND NOT 15s.
+# Measured on this endpoint: the auditor answered 0/5 calls at a 15s timeout and 2/2 at 120s, taking
+# 19.0s and 35.1s. The narrator's SUCCESSFUL calls on the same host take 58-61s. A 15s budget could
+# never have succeeded; it bought nothing and cost a full 15s of user-visible latency on every
+# report. See AGENT_PROFILE[AGENT_AUDITOR].
+# ================================================================================================
+ADV_AUDIT_FLAG        = "auditor_flag"           # the auditor ran and DISAGREED with the narrative
+ADV_AUDIT_NOCREDS     = "auditor_no_credentials"
+ADV_AUDIT_FAILED      = "auditor_failed"
+ADV_AUDIT_TIMEOUT     = "auditor_timeout"
+ADV_AUDIT_COOLDOWN    = "auditor_cooldown"
+ADV_AUDIT_UNPARSEABLE = "auditor_unparseable"
+ADV_AUDIT_BUDGET      = "auditor_skipped_budget"
+
+# state -> (advisory code or None, human sentence). "ok" and "flagged" mean the auditor really ran.
+_AUDIT_ADVISORY = {
+    "ok":           (None,                  "Auditor agreed with the narrative."),
+    "flagged":      (ADV_AUDIT_FLAG,        "Auditor flagged the narrative."),
+    "no_credentials": (ADV_AUDIT_NOCREDS,   "Auditor is not configured, so this report was not reviewed."),
+    "cooldown":     (ADV_AUDIT_COOLDOWN,    "Auditor is in cooldown after an earlier failure, so this report was not reviewed."),
+    "timeout":      (ADV_AUDIT_TIMEOUT,     "Auditor timed out, so this report was not reviewed."),
+    "failed":       (ADV_AUDIT_FAILED,      "Auditor call failed, so this report was not reviewed."),
+    "unparseable":  (ADV_AUDIT_UNPARSEABLE, "Auditor replied with something that is not the expected verdict, so its answer was discarded."),
+    "skipped_budget": (ADV_AUDIT_BUDGET,    "Auditor was skipped to stay inside the request time budget."),
+    "skipped":      (None,                  "Auditor does not run for this report."),
+}
+
+def _audit_prompt(payload: dict, draft: str) -> str:
+    return (
+        "You are a Data Auditor verifying an operational report against raw facts.\n\n"
+        f"FACTS DATA:\n{json.dumps(payload, ensure_ascii=False)}\n\n"
+        f"DRAFT NARRATIVE TO AUDIT:\n{draft}\n\n"
+        "Audit the draft narrative against the facts. Verify that numbers, facts, and conclusions "
+        "match. Judge ONLY against the FACTS DATA above -- it is the same data the writer was "
+        "given, so anything absent from it is out of scope and must not be flagged as missing.\n"
+        "Return ONLY a JSON object with this exact shape:\n"
+        '{"is_valid": true, "reason": null} OR '
+        '{"is_valid": false, "reason": "Short explanation of discrepancy"}'
+    )
+
+def audit_llm(facts: dict, draft_narrative: str, lang: str = "en", budget_left=None) -> dict:
+    """Second-opinion review of a narrative. NEVER raises, NEVER blocks. -> audit state dict:
+
+        {"ran": bool, "state": str, "is_valid": bool|None, "reason": str|None,
+         "latency_s": float, "advisory_code": str|None}
+
+    `state` is one of the keys of _AUDIT_ADVISORY. `ran` is True only when the auditor actually
+    answered -- which is the point: previously every failure path returned is_valid=True, so a
+    100%-dead auditor was indistinguishable from one that had read the report and approved it.
+    """
+    t0 = time.time()
+
+    def out(state, is_valid=None, reason=None):
+        code, sentence = _AUDIT_ADVISORY.get(state, (ADV_AUDIT_FAILED, "Auditor state unknown."))
+        return {"ran": state in ("ok", "flagged"), "state": state, "is_valid": is_valid,
+                "reason": reason, "latency_s": round(time.time() - t0, 2),
+                "advisory_code": code, "message": sentence}
+
+    prompt = _audit_prompt(trim_facts_for_prompt(facts, lang), draft_narrative)
+    text, reason, err = invoke_agent(AGENT_AUDITOR, "LAPLACE_AUDITOR_INVOKE_URL",
+                                     "LAPLACE_AUDITOR_BEARER_SECRET", prompt,
+                                     budget_left=budget_left)
+    if text is None:
+        state = {"no_credentials": "no_credentials", "cooldown": "cooldown",
+                 "timeout": "timeout", "no_budget": "skipped_budget"}.get(err, "failed")
+        return out(state, reason=reason)
+
+    parsed = _parse_json_object(text)
+    if not (isinstance(parsed, dict) and "is_valid" in parsed):
+        return out("unparseable", reason=f"auditor reply was not the expected verdict: {text[:120]}")
+
+    valid = bool(parsed.get("is_valid"))
+    return out("ok" if valid else "flagged", is_valid=valid, reason=parsed.get("reason"))
+
+
+def audit_advisories(audit: dict) -> list:
+    """The advisory list for an audit outcome. [] when the auditor ran and agreed."""
+    if not isinstance(audit, dict):
+        return []
+    code = audit.get("advisory_code")
+    if not code:
+        return []
+    msg = audit.get("message") or "Auditor did not review this report."
+    detail = audit.get("reason")
+    if code == ADV_AUDIT_FLAG:
+        msg = f"Auditor Agent flagged narrative: {detail or 'discrepancy detected'}"
+    elif detail:
+        msg = f"{msg} ({detail})"
+    return [{"code": code, "message": msg}]
 
 # ============================================================ 4. TEMPLATE FALLBACK (deterministic)
 def _plural(n, en): return "" if (en and n == 1) else ("" if not en else "s")
@@ -1347,12 +1589,16 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
         if cached:
             return {**cached, "cached": True}
 
+    started = time.time()
     facts = assemble_facts(store, t, policies, window_h)
     allowed = allowed_numbers(facts)
     schema = schema_strip_re(facts)          # the facts' own digit-bearing key names
     raw, reason = generate_llm(facts, lang, length)
     unver, bad_field, advisories, draft = [], None, [], None
     selection, chart_adv = [], []
+    audit = {"ran": False, "state": "skipped", "is_valid": None, "reason": None,
+             "latency_s": 0.0, "advisory_code": None,
+             "message": _AUDIT_ADVISORY["skipped"][1]}
 
     if raw is not None:
         # shape the reply (JSON contract -> markdown, or prose as-is); `llm` is the composed text
@@ -1360,7 +1606,7 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
         llm, content_reason, claims, obj = compose_narration(raw, lang, length)
         # the agent's chart picks: enum-validated, unknown ids dropped with an advisory each
         selection, chart_adv = select_charts(obj)
-        # ADVISORY LAYER: never blocks, never feeds back into `mode`. Reviewer-agent seam.
+        # ADVISORY LAYER: never blocks, never feeds back into `mode`.
         advisories = advisory_review(llm, lang, length, obj) + chart_adv
     else:
         llm, content_reason, claims, obj = None, None, None, None
@@ -1372,10 +1618,7 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
         text, mode, reason = render_template(facts, lang, length), "template_llm_rejected", content_reason
         draft = {"text": llm, "field": None, "unverified": [], "reason": content_reason}
     else:
-        # HARD GATE (b): every asserted number must trace to a fact. Scoped to the agent's own
-        # field values, with schema identifiers removed, so scaffolding and field NAMES are never
-        # mistaken for claims. A numeric rejection is a content problem, NOT an endpoint failure,
-        # so it must not trip the circuit breaker (generate_llm owns _LLM_COOLDOWN).
+        # HARD GATE (b): every asserted number must trace to a fact.
         unver, bad_field = check_claims(claims, llm, allowed, schema)
         if not unver:
             text, mode, reason = llm, "llm", None
@@ -1386,42 +1629,40 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
                       f"{'' if len(unver) == 1 else 's'} ({', '.join(unver)})")
             draft = {"text": llm, "field": bad_field, "unverified": unver, "reason": reason}
 
-    # ---- charts: computed here, from the facts and the store, for EVERY mode --------------------
-    # When the narration was not used (no key, endpoint down, numeric rejection) the agent's
-    # selection is discarded along with its prose and Python picks the full default set, so the
-    # panel looks the same offline as it does with the agent. Charts belong to the full report.
+    # ---- AGENT 2 (Data Auditor): advisory second opinion --------------------------------------
+    # Placed HERE, deliberately, and not where it was:
+    #   * after the hard gate, and only for mode == "llm" -- auditing a draft the numeric gate is
+    #     about to throw away spends a call reviewing text nobody will read;
+    #   * only for length == "full" -- the brief report is polled every ~12s with a cache key that
+    #     (measured) changes 48 times between polls, so auditing it meant an extra outbound call
+    #     every 12 seconds for a paragraph in a sidebar;
+    #   * inside a total time budget -- if narration already consumed the request, the audit is
+    #     skipped and says so rather than making the user wait longer for an advisory note.
+    if mode == "llm" and length == "full" and audit_enabled():
+        left = REPORT_TIME_BUDGET - (time.time() - started)
+        audit = audit_llm(facts, text, lang=lang, budget_left=left)
+        advisories = list(advisories) + audit_advisories(audit)
+
+    # ---- charts: computed here, from the facts and the store, for EVERY mode ----
     charts, charts_unavailable = [], []
     if length == "full":
         picks = selection if mode == "llm" else [(cid, "") for cid in chartreg.DEFAULT_ORDER]
         charts, charts_unavailable = assemble_charts(picks, facts, store, t, policies, lang)
-        # ADVISORY LAYER, second pass: a caption can only be checked against its chart once the
-        # chart exists. Non-blocking, exactly like the rest of the layer -- `mode` is already final.
         advisories = list(advisories) + caption_consistency_review(charts)
 
     out = {"text": text, "mode": mode, "length": length, "lang": lang, "window_h": window_h,
            "generated_iso": facts["now_iso"], "virtual_ts": t,
-           # `checked` distinguishes "the numeric check ran and passed" from "it never ran because
-           # the reply was rejected as non-report content first"
            "numeric_check": {"ok": (not unver), "checked": bool(llm is not None and not content_reason),
                              "unverified": unver, "field": bad_field},
-           # advisory flags: quality observations, NOT rejection reasons. Present on accepted
-           # reports too -- a flagged report is still shown.
+           # the auditor's own state, so "did the second agent actually run?" is answerable at a
+           # glance instead of being inferred from the absence of a flag
+           "auditor": audit,
            "advisories": advisories,
-           # finished chart data: labels + datasets already computed, in the order to draw them.
-           # The frontend loops and draws; it computes nothing.
            "charts": charts,
-           # selected (or auto-appended) but not drawable, with the renderer's reason -- so a
-           # missing chart is explained rather than silently absent.
            "charts_unavailable": charts_unavailable,
-           # the draft the hard gate threw away, kept so the next false positive is diagnosable at
-           # a glance instead of by round-tripping. NOT rendered as the report; the template is.
            "rejected_draft": draft,
            "fallback_reason": (None if mode == "llm" else (reason or "template fallback")),
            "facts": facts, "cached": False}
-    # Only a successful LLM narration is cached. A fallback is a transient condition (cooldown,
-    # timeout, a one-off numeric rejection); pinning it for the whole TTL is what made the fixed
-    # bug keep reappearing with "cached": true. Fallbacks are therefore re-attempted next request,
-    # bounded by the 120s circuit breaker and the frontend's 12s brief-report throttle.
     if mode == "llm":
         _cache_put(key, out, to_disk=persist)
     return out

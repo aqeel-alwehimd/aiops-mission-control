@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from models import Store
 from replay import VirtualClock
 from report import build_report
+import report
 import charts as chartreg
 from dotenv import load_dotenv
 load_dotenv()  # Loads variables from .env into os.environ
@@ -192,6 +193,18 @@ def api_policies_reset():
 def health():
     """Liveness probe for the platform."""
     return {"status": "ok"}
+
+@app.get("/api/debug/llm_calls")
+def api_debug_llm_calls(limit: int = Query(100, ge=1, le=200)):
+    """Outbound agent-call log: agent, endpoint (host+path, secrets never recorded), payload size,
+    latency, status, exception. EMPTY unless LAPLACE_DEBUG is set -- recording is off by default.
+    Also reports each agent's cooldown, which is namespaced per agent."""
+    return {"debug_enabled": report.debug_on(),
+            "cooldowns": {a: {"seconds_remaining": round(report.cooldown_remaining(a)[0], 1),
+                              "why": report.cooldown_remaining(a)[1]}
+                          for a in (report.AGENT_MAIN, report.AGENT_AUDITOR)},
+            "audit_enabled": report.audit_enabled(),
+            "calls": report.call_log(limit)}
 
 @app.get("/api/heroes")
 def api_heroes():

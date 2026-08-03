@@ -21,6 +21,10 @@ not ended their own bucket. This script asserts the resulting identities hold ev
 replay window, at several lookbacks and thresholds, and measures how big the old gap really was.
 """
 import sys
+import os
+# These suites are not about the second agent: disable it so they can never make a live
+# auditor call, whatever is in the environment. verify_auditor.py covers it, fully mocked.
+os.environ["REPORT_AUDIT"] = "0"
 import report
 from models import Store
 

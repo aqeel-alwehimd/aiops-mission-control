@@ -6,6 +6,10 @@ Run:  python verify_resilience.py
 """
 import io, json, sys, time, contextlib
 
+import os
+# These suites are not about the second agent: disable it so they can never make a live
+# auditor call, whatever is in the environment. verify_auditor.py covers it, fully mocked.
+os.environ["REPORT_AUDIT"] = "0"
 import report
 from diagnose_guardrail import FACTS
 
@@ -42,7 +46,7 @@ GOOD = {"message": {"content": json.dumps({
 
 def run_llm(script, lang="en", length="full", facts=None):
     """Drive the REAL generate_llm with a mocked requests.post. Returns (text, reason, mock, log)."""
-    report._LLM_COOLDOWN, report._LLM_COOLDOWN_WHY = 0.0, ""
+    report.clear_cooldowns()
     mock = Mock(script)
     real_post, real_base = report.requests.post, report.RETRY_BASE
     report.requests.post = mock
@@ -63,15 +67,15 @@ os.environ["LAPLACE_BEARER_SECRET"] = SECRET
 print("=" * 100); print("CASE 1 - HTTP 504, then the retry succeeds")
 t, r, m, log = run_llm([FakeResp(504), FakeResp(200, GOOD)])
 print(f"  attempts made : {m.calls}\n  reason        : {r}\n  cooldown      : "
-      f"{max(0, report._LLM_COOLDOWN - time.time()):.0f}s")
+      f"{report.cooldown_remaining(report.AGENT_MAIN)[0]:.0f}s")
 check("report succeeded on the retry", t is not None and r is None, repr(r))
 check("exactly 2 attempts made", m.calls == 2, str(m.calls))
-check("no cooldown set after an eventual success", report._LLM_COOLDOWN <= time.time())
+check("no cooldown set after an eventual success", report.cooldown_remaining(report.AGENT_MAIN)[0] == 0)
 
 # ============================================================ 2. three consecutive 504s
 print("=" * 100); print("CASE 2 - three consecutive 504s (retries exhausted)")
 t, r, m, log = run_llm([FakeResp(504), FakeResp(504), FakeResp(504)])
-cd = report._LLM_COOLDOWN - time.time()
+cd = report.cooldown_remaining(report.AGENT_MAIN)[0]
 print(f"  attempts made : {m.calls}\n  reason        : {r}\n  cooldown      : {cd:.0f}s")
 check("gave up after 3 attempts", t is None and m.calls == 3, str(m.calls))
 check("reason names the status and attempt count",
@@ -87,7 +91,7 @@ check("cooldown reason names the cause and remaining seconds",
 # ============================================================ 3. 401 -> no retry, long cooldown
 print("=" * 100); print("CASE 3 - HTTP 401 (auth): must NOT retry")
 t, r, m, log = run_llm([FakeResp(401), FakeResp(200, GOOD)])
-cd = report._LLM_COOLDOWN - time.time()
+cd = report.cooldown_remaining(report.AGENT_MAIN)[0]
 print(f"  attempts made : {m.calls}\n  reason        : {r}\n  cooldown      : {cd:.0f}s")
 check("exactly 1 attempt -- auth is not retried", m.calls == 1, str(m.calls))
 check("reason is auth-specific and actionable",
@@ -98,7 +102,7 @@ check(f"LONG cooldown ({report.COOLDOWN_AUTH}s)",
 # ============================================================ 3b. 400 -> no retry, long cooldown
 print("=" * 100); print("CASE 3b - HTTP 400 (malformed): must NOT retry")
 t, r, m, log = run_llm([FakeResp(400), FakeResp(200, GOOD)])
-cd = report._LLM_COOLDOWN - time.time()
+cd = report.cooldown_remaining(report.AGENT_MAIN)[0]
 print(f"  attempts made : {m.calls}\n  reason        : {r}\n  cooldown      : {cd:.0f}s")
 check("exactly 1 attempt -- malformed request is not retried", m.calls == 1, str(m.calls))
 check("reason says the request was rejected as malformed", "malformed" in (r or ""), repr(r))
@@ -109,7 +113,7 @@ check(f"LONG cooldown ({report.COOLDOWN_CLIENT}s)",
 print("=" * 100); print("CASE 4 - read timeout (transient): retried, then short cooldown")
 Timeout = report.requests.exceptions.Timeout
 t, r, m, log = run_llm([Timeout("t1"), Timeout("t2"), Timeout("t3")])
-cd = report._LLM_COOLDOWN - time.time()
+cd = report.cooldown_remaining(report.AGENT_MAIN)[0]
 print(f"  attempts made : {m.calls}\n  reason        : {r}\n  cooldown      : {cd:.0f}s")
 check("timeout retried up to 3 attempts", m.calls == 3, str(m.calls))
 check("reason names the timeout and attempt count",
@@ -125,7 +129,7 @@ print("=" * 100); print("CASE 5 - plain HTTP 200 (no behaviour change)")
 t, r, m, log = run_llm([FakeResp(200, GOOD)])
 print(f"  attempts made : {m.calls}\n  reason        : {r}")
 check("single attempt, success", m.calls == 1 and t is not None and r is None, str(m.calls))
-check("no cooldown", report._LLM_COOLDOWN <= time.time())
+check("no cooldown", report.cooldown_remaining(report.AGENT_MAIN)[0] == 0)
 
 # ============================================================ secret never logged
 print("=" * 100); print("SECRET HYGIENE")
@@ -215,5 +219,5 @@ print()
 print("=" * 100)
 print(f"{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL: print("  FAILED:", f)
-report._LLM_COOLDOWN = 0.0
+report.clear_cooldowns()
 sys.exit(1 if FAIL else 0)

@@ -5,6 +5,10 @@ Exits; starts no server.
 Run:  python verify_layers.py
 """
 import sys, json
+import os
+# These suites are not about the second agent: disable it so they can never make a live
+# auditor call, whatever is in the environment. verify_auditor.py covers it, fully mocked.
+os.environ["REPORT_AUDIT"] = "0"
 import report
 from diagnose_guardrail import FACTS
 
@@ -19,7 +23,7 @@ POLICIES = {"alert_threshold": 0.30, "node_filter_pct": 25}
 report.assemble_facts = lambda store, t, policies, window_h=6: FACTS
 
 def run(reply, lang="en", length="full"):
-    report._CACHE.clear(); report._LLM_COOLDOWN = 0.0
+    report._CACHE.clear(); report.clear_cooldowns()
     raw = reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)
     report.generate_llm = lambda facts, l, ln: (raw, None)
     return report.build_report(None, FakeClock(), POLICIES, window_h=24, lang=lang, length=length)

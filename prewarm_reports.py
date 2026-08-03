@@ -72,6 +72,10 @@ def main():
     policies.setdefault("node_filter_pct", 25)
 
     if args.mock:
+        # --mock is documented as "no network", so it must ENFORCE that rather than rely on the
+        # caller. Stubbing generate_llm alone stopped being enough once a second agent existed:
+        # measured, `--mock` was making one live auditor call per language/length combination.
+        os.environ["REPORT_AUDIT"] = "0"
         # a faithful-looking reply built FROM the facts, so it passes the hard gate exactly as a
         # real one would -- this exercises compose -> gate -> cache, only the network is stubbed.
         def _mock(facts, lang, length):

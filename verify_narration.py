@@ -10,6 +10,10 @@ rejected result is never cached.
 """
 import sys, json, importlib
 
+import os
+# These suites are not about the second agent: disable it so they can never make a live
+# auditor call, whatever is in the environment. verify_auditor.py covers it, fully mocked.
+os.environ["REPORT_AUDIT"] = "0"
 import report
 from verify_guardrail import FACTS
 
@@ -57,7 +61,7 @@ F_HALLUC = json.dumps({
 report.assemble_facts = lambda store, t, policies, window_h=6: FACTS
 
 def run(raw, lang="en", length="full"):
-    report._CACHE.clear(); report._LLM_COOLDOWN = 0.0
+    report._CACHE.clear(); report.clear_cooldowns()
     report.generate_llm = lambda facts, l, ln: (raw, None)
     return report.build_report(None, FakeClock(), POLICIES, window_h=24, lang=lang, length=length)
 

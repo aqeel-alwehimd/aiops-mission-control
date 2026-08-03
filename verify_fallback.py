@@ -9,6 +9,10 @@ sqlite store and no dashboard process.
 """
 import os, sys, time, importlib
 
+import os
+# These suites are not about the second agent: disable it so they can never make a live
+# auditor call, whatever is in the environment. verify_auditor.py covers it, fully mocked.
+os.environ["REPORT_AUDIT"] = "0"
 import report
 from verify_guardrail import FACTS
 
@@ -33,7 +37,7 @@ def build(**kw):
 
 def reset_state():
     report._CACHE.clear()
-    report._LLM_COOLDOWN = 0.0
+    report.clear_cooldowns()
 
 # ---------------------------------------------------------------- A. clean LLM -> cached
 print("\nA. successful narration is accepted and IS cached")
@@ -57,7 +61,7 @@ check("fallback_reason is None", b["fallback_reason"] is None)
 # ---------------------------------------------------------------- C. genuine hallucination
 print("\nC. a real hallucination is still rejected, is NOT cached, and does NOT trip the breaker")
 reset_state(); with_llm('Last 24 h: 9999 jobs submitted, 1275 ended, of which 1066 COMPLETED. No node anomaly onsets in the window. Watching 1 node.')
-cool_before = report._LLM_COOLDOWN
+cool_before = report.cooldown_remaining(report.AGENT_MAIN)[0]
 c1 = build(); c2 = build()
 check("mode == template_llm_rejected", c1["mode"] == "template_llm_rejected", c1["mode"])
 check("unverified lists the number", c1["numeric_check"]["unverified"] == ["9999"],
@@ -65,8 +69,9 @@ check("unverified lists the number", c1["numeric_check"]["unverified"] == ["9999
 check("fallback_reason names the cause",
       c1["fallback_reason"] == "numeric check failed: 1 unmatched number (9999)",
       repr(c1["fallback_reason"]))
-check("rejection did NOT trip the circuit breaker", report._LLM_COOLDOWN == cool_before,
-      f"cooldown {report._LLM_COOLDOWN}")
+check("rejection did NOT trip the circuit breaker",
+      report.cooldown_remaining(report.AGENT_MAIN)[0] == cool_before,
+      f"cooldown {report.cooldown_remaining(report.AGENT_MAIN)[0]}")
 check("rejected result was NOT cached (retried next request)", c2["cached"] is False)
 
 # multi-number rejection wording
@@ -114,12 +119,13 @@ try:
 
     # connection refused -> ConnectionError branch, trips the breaker
     os.environ["LAPLACE_BEARER_SECRET"] = SECRET
-    report._LLM_COOLDOWN = 0.0
+    report.clear_cooldowns()
     t, r = report.generate_llm(FACTS, "en", "brief")
     # CONTRACT CHANGE: transient failures are now RETRIED, so the reason names the attempt count.
     check("refused connection reported, with retry count",
           t is None and r.startswith("could not connect to endpoint after") and "attempt" in r, repr(r))
-    check("connection failure DID trip the breaker", report._LLM_COOLDOWN > time.time())
+    check("connection failure DID trip the breaker",
+          report.cooldown_remaining(report.AGENT_MAIN)[0] > 0)
 
     # ...and while it is tripped the reason says COOLDOWN, not "missing key"
     t, r = report.generate_llm(FACTS, "en", "brief")
@@ -136,7 +142,7 @@ try:
     leaked = [x for x in reasons if x and (SECRET in x or SECRET[:12] in x)]
     check("bearer secret never appears in fallback_reason", not leaked, str(reasons[:1]))
 finally:
-    report._LLM_COOLDOWN = 0.0
+    report.clear_cooldowns()
     for k, v in old_env.items():
         if v is None: os.environ.pop(k, None)
         else: os.environ[k] = v
