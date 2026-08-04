@@ -281,8 +281,8 @@ check("the auditor payload is the TRIMMED view, not the whole facts dict",
 check("...which is byte-identical to what the narrator was given, so no field the narrative "
       "could cite is withheld",
       json.dumps(report.trim_facts_for_prompt(FACTS, "en"), ensure_ascii=False) in prompt)
-check("the prompt tells the auditor not to flag what is out of scope",
-      "out of scope" in prompt)
+check("the prompt tells the auditor not to flag what the writer never saw",
+      "must never be flagged as missing" in prompt, prompt[-400:])
 d, r, log = run([FakeResp(504), Timeout("x")], quiet=True)
 check("the bearer secret never appears in any advisory message",
       not any("sk-auditor-secret" in a["message"] for a in d["advisories"]))
@@ -309,7 +309,177 @@ check("every distinct failure mode has its own advisory code",
 check("audit_llm never raises, whatever it is handed",
       report.audit_llm({}, "", lang="en", budget_left=-5)["ran"] is False)
 
+# ============================================================ 12. the REBUILT contract
+# The auditor's output shape changed from a verdict to a list of findings, its prompt changed to
+# target relational claims rather than numeric ones, and its scope grew to include captions. None of
+# that may weaken anything asserted above, which is why these cases come last rather than replacing
+# the ones before them.
 print()
+print("=" * 100)
+print("CASE 12 - the findings contract")
+print("=" * 100)
+
+def findings_reply(findings, checked=("checked the flagged partition",
+                                      "checked the failure identity",
+                                      "checked the two cohorts")):
+    return {"message": {"content": json.dumps({"relational_claims_checked": list(checked),
+                                               "findings": list(findings)})}}
+
+FIND = [{"quote": "the 231 resolved failures sit within that cohort",
+         "contradicts": "prediction_outcomes.failures_resolved vs flagged_total",
+         "why": "failures_resolved includes misses, which were never flagged",
+         "severity": "high", "location": "narrative"}]
+
+d, r, _ = run([FakeResp(200, findings_reply(FIND))])
+show("CASE 12a - auditor returns a findings LIST with one finding", d, r)
+check("a non-empty findings list flags the report", d["auditor"]["state"] == "flagged")
+check("the report is STILL served -- findings are advisory", d["mode"] == "llm")
+check("the finding survives into the auditor block", len(d["auditor"]["findings"]) == 1)
+check("the quoted span reaches the advisory",
+      any("231 resolved failures" in a["message"] for a in d["advisories"]), str(codes(d)))
+check("the severity reaches the advisory", any("[high]" in a["message"] for a in d["advisories"]))
+check("the contradicted fact reaches the advisory",
+      any("failures_resolved" in a["message"] for a in d["advisories"]))
+check("is_valid is retained and means 'the findings list was empty'",
+      d["auditor"]["is_valid"] is False)
+
+d, r, _ = run([FakeResp(200, findings_reply([]))])
+show("CASE 12b - empty findings list is the PASS condition", d, r)
+check("an empty findings list is state ok", d["auditor"]["state"] == "ok")
+check("no auditor advisory is raised", not any(c.startswith("auditor") for c in codes(d)),
+      str(codes(d)))
+check("the work it says it did is recorded", len(d["auditor"]["checked"]) == 3)
+check("is_valid True", d["auditor"]["is_valid"] is True)
+
+MANY = [dict(FIND[0], quote=f"claim {i}") for i in range(12)]
+d, r, _ = run([FakeResp(200, findings_reply(MANY))])
+n_flag = sum(1 for a in d["advisories"] if a["code"] == report.ADV_AUDIT_FLAG)
+check("many findings produce one advisory each, capped, with the remainder counted",
+      n_flag == report.MAX_AUDIT_FINDINGS + 1, f"{n_flag} advisories for {len(MANY)} findings")
+check("   and the report is still served", d["mode"] == "llm")
+
+d, r, _ = run([FakeResp(200, verdict(False, "the old single-boolean shape"))])
+check("the PREVIOUS verdict shape is still understood, not discarded as unparseable",
+      d["auditor"]["state"] == "flagged" and d["auditor"]["ran"] is True, d["auditor"]["state"])
+check("   and it is normalised into a finding",
+      len(d["auditor"]["findings"]) == 1
+      and "old single-boolean" in d["auditor"]["findings"][0]["why"])
+d, r, _ = run([FakeResp(200, {"message": {"content": json.dumps({"verdict": "looks fine"})}})])
+check("a reply that is neither shape is still unparseable, not a silent pass",
+      d["auditor"]["state"] == "unparseable" and d["auditor"]["ran"] is False)
+print()
+
+print("=" * 100)
+print("CASE 13 - the prompt targets the RELATIONAL class and carries the cohort identities")
+print("=" * 100)
+p = report._audit_prompt(report.trim_facts_for_prompt(FACTS, "en"), "draft",
+                         identities=report.cohort_prose(FACTS),
+                         captions=[("prediction_outcomes", "a caption the agent wrote")])
+for label, needle in (
+        ("states that numbers are ALREADY verified", "already verified"),
+        ("says re-checking a number is NOT its job", "is NOT your job"),
+        ("names containment as the target class", "CONTAINMENT"),
+        ("names the wrong-denominator class", "DENOMINATOR"),
+        ("names unsupported causal claims", "CAUSATION"),
+        ("names qualitative contradiction with no number", "QUALITATIVE CONTRADICTION"),
+        ("names material omission", "MATERIAL OMISSION"),
+        ("carries a worked example of a real false claim", "sit within that cohort"),
+        ("carries a CORRECT counter-example so it is not taught to object to everything",
+         "CORRECT, DO NOT FLAG"),
+        ("asks for findings, not a verdict", '"findings"'),
+        ("requires the relational claims it checked to be enumerated",
+         "relational_claims_checked"),
+        ("says an empty list is the right answer for a sound report", "EMPTY findings list is the correct"),
+        ("includes the agent's caption in scope", "a caption the agent wrote"),
+        ("tells it a caption is a claim", "a caption is a claim")):
+    check(f"prompt {label}", needle in p, needle)
+check("the prompt states the non-containment the live failures violated",
+      "misses.count is NOT part of" in p and "failures_resolved is NOT part of" in p)
+check("the identities carry THIS report's live values",
+      str(FACTS["prediction_outcomes"]["flagged_total"]) in p)
+check("the payload is still the TRIMMED view the narrator saw",
+      json.dumps(report.trim_facts_for_prompt(FACTS, "en"), ensure_ascii=False) in p)
+print(f"  prompt is {len(p)} characters (was ~{len(json.dumps(FACTS, ensure_ascii=False)) + 400})")
+print()
+
+print("=" * 100)
+print("CASE 14 - captions are audited, and the resilience profile is unchanged")
+print("=" * 100)
+seen_prompt = {}
+class Capture(Router):
+    def __call__(self, url, headers=None, json=None, timeout=None):
+        if url == AUD_URL:
+            seen_prompt["text"] = (json or {}).get("message", "")
+            seen_prompt["timeout"] = timeout
+        return Router.__call__(self, url, headers=headers, json=json, timeout=timeout)
+
+report._CACHE.clear(); report.clear_cooldowns()
+DRAFT_WITH_CHART = dict(GOOD_DRAFT, chart_configs=[
+    {"chart_id": "prediction_outcomes", "caption": "A caption written by the agent."},
+    {"chart_id": "job_outcome_mix", "caption": ""}])
+report.generate_llm = lambda facts, l, ln: (json.dumps(DRAFT_WITH_CHART, ensure_ascii=False), None)
+os.environ["LAPLACE_AUDITOR_INVOKE_URL"] = AUD_URL
+os.environ["LAPLACE_AUDITOR_BEARER_SECRET"] = "sk"
+os.environ["LAPLACE_INVOKE_URL"] = MAIN_URL
+os.environ["LAPLACE_BEARER_SECRET"] = "sk"
+cap_router = Capture([FakeResp(200, findings_reply([]))])
+real_post = report.requests.post
+report.requests.post = cap_router
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        d = report.build_report(None, FakeClock(), POLICIES, window_h=24, lang="en", length="full")
+finally:
+    report.requests.post = real_post
+check("the agent's caption was sent to the auditor",
+      "A caption written by the agent." in seen_prompt.get("text", ""))
+check("an EMPTY caption is not sent (Python writes those, there is nothing to audit)",
+      "job_outcome_mix" not in seen_prompt.get("text", "").split("REPORT NARRATIVE")[0]
+      .split("CHART CAPTIONS")[-1])
+check("the auditor still uses its own generous per-attempt timeout, not the 15s that failed 5/5",
+      seen_prompt.get("timeout", 0) >= 60.0, str(seen_prompt.get("timeout")))
+check("the auditor profile is unchanged: 2 attempts, 75s deadline, 60s timeout",
+      report.AGENT_PROFILE[report.AGENT_AUDITOR] ==
+      {"attempts": 2, "deadline": 75.0, "timeout": 60.0, "min_room": 10.0},
+      str(report.AGENT_PROFILE[report.AGENT_AUDITOR]))
+check("it still routes through invoke_agent (one resilient path for both agents)",
+      "invoke_agent" in report.audit_llm.__code__.co_names)
+print()
+
+# ============================================================ 15. the DETERMINISTIC cohort check
+print("=" * 100)
+print("CASE 15 - cohort_containment_review: deterministic, non-blocking, and quiet on good text")
+print("=" * 100)
+FALSE_SENT = ("P3 flagged 331 jobs at submission, and the 231 resolved failures sit within that "
+              "cohort.")
+TRUE_SENT  = ("P3 flagged 331 jobs at submission; separately, 78 failures were never flagged.")
+FX = {"jobs_window": {"submitted": 2245, "flagged_at_submission": 331,
+                      "submitted_outcome_known": 1735, "submitted_still_running": 510,
+                      "ended_in_window": 2029, "ended_in_window_failed": 254,
+                      "ended_in_window_timeout": 98, "ended_in_window_oom": 8,
+                      "ended_in_window_completed": 1669},
+      "prediction_outcomes": {"flagged_total": 331, "failures_resolved": 231,
+                              "correct_warnings": {"count": 153}, "false_alarms": {"count": 86},
+                              "pending_outcome": {"count": 92}, "misses": {"count": 78}}}
+hit = report.cohort_containment_review(FALSE_SENT, FX)
+check("a false containment between two REAL facts is caught", len(hit) == 1, str(hit))
+check("   the advisory names the offending sentence",
+      hit and "sit within that cohort" in hit[0]["message"])
+check("   and its code is its own, not borrowed from the caption check",
+      hit and hit[0]["code"] == report.ADV_COHORT)
+check("the CORRECT sentence stating misses separately is NOT flagged",
+      report.cohort_containment_review(TRUE_SENT, FX) == [], "this is the documented FP trap")
+check("a caption is covered as well as the body",
+      len(report.cohort_containment_review("", FX, [("caption on 'x'",
+          "The ring covers all 331 flagged jobs, including the 78 missed failures.")])) == 1)
+check("correct_warnings is never resolvable -- it genuinely belongs to two sets",
+      153 not in report.resolve_sets(FX).keys() or
+      report.resolve_sets(FX).get(153) is None, str(report.resolve_sets(FX).get(153)))
+check("the check never raises on junk input",
+      report.cohort_containment_review(None, {}) == []
+      and report.cohort_containment_review("x", None) == [])
+print()
+
 print("=" * 100)
 print(f"{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL: print("  FAILED:", f)

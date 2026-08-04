@@ -678,8 +678,20 @@ check("it carries the explicit contrast with the per-prediction chart",
       p["contrast_note"]["key"] == "mi.importance.vsPerPrediction")
 check("a model with no STORED global importance is reported, not improvised",
       any(u["model_id"] == "P2" and u["code"] == "not_stored" for u in imp["unavailable"]))
-check("   and the reason says why a derived stand-in was refused",
-      any("biased local average" in u["reason"] for u in imp["unavailable"] if u["model_id"] == "P2"))
+# CONTRACT CHANGE: P2 now HAS a panel (LightGBM native gain, exported by export_p2_importance.py).
+# A store whose meta carries no p2_global_importance is still reported rather than improvised, and
+# the reason now points at the export instead of explaining a refusal.
+check("   and the reason points at the export that would supply it",
+      any("export_p2_importance" in u["reason"]
+          for u in imp["unavailable"] if u["model_id"] == "P2"),
+      str([u["reason"][:70] for u in imp["unavailable"]]))
+# with a real store both panels exist, use DIFFERENT metrics, and are marked not comparable
+_real = chartreg.model_importance_panels(__import__("models").Store())
+check("   against the real store, BOTH models have a panel",
+      {"model_importance_p3", "model_importance_p2"}
+      <= {p["chart_id"] for p in _real["panels"]},
+      str([p["chart_id"] for p in _real["panels"]]))
+check("   and the pair is flagged as not comparable", _real.get("comparable") is False)
 check("a store with no stored P3 importance reports P3 unavailable too",
       any(u["model_id"] == "P3" for u in
           chartreg.model_importance_panels(MetaStore({}))["unavailable"]))

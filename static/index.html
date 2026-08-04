@@ -77,6 +77,7 @@
                     <option value="86400" data-i18n="speed.1d">1 天/秒</option>
                 </select>
                 <input id="scrubber" type="range" min="0" max="1000" value="0" class="w-24" oninput="scrubbing=true" onchange="doScrub(this.value)">
+                    <select id="demo-moment" onchange="gotoMoment(this.value)" title="Jump to a prepared demo moment and hold there" class="hidden bg-slate-900 border border-amber-600/60 text-amber-300 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-amber-400"></select>
             </div>
             <div class="flex flex-col items-end leading-tight">
                 <div class="font-mono text-cyan-400 text-lg glow-text-cyan" id="vclock">--:--:--</div>
@@ -291,7 +292,9 @@
                                     <i class="fa-solid fa-ranking-star mr-1"></i><span id="mi-importance-h"></span>
                                 </div>
                                 <p id="mi-importance-scope" class="text-[11px] text-slate-400 mb-1"></p>
-                                <p id="mi-importance-vs" class="text-[11px] text-amber-300/80 mb-3 leading-relaxed"></p>
+                                <p id="mi-importance-vs" class="text-[11px] text-amber-300/80 mb-2 leading-relaxed"></p>
+                                <!-- the two panels measure different things; say so above them -->
+                                <p id="mi-importance-incomparable" class="text-[11px] text-rose-300/85 mb-3 leading-relaxed hidden"></p>
                                 <div id="mi-importance-grid" class="space-y-3"></div>
                                 <div id="mi-importance-missing" class="mt-2 text-[10px] text-slate-500 hidden"></div>
                             </div>
@@ -414,15 +417,17 @@
             "chart.jobOutcomeMix.title":"任務結束狀態分佈","chart.jobOutcomeMix.sub":"本視窗內結束的任務（提交時間不限）",
             "chart.topFlaggedJobs.title":"最高風險的已標記任務","chart.topFlaggedJobs.sub":"執行中／排隊中，風險達告警門檻",
             "chart.nodeRiskWatch.title":"關注節點 P2 風險","chart.nodeRiskWatch.sub":"與節點告警門檻的比較",
-            "chart.nodeContrib.title":"此節點為何被標記","chart.nodeContrib.sub":"該次預測的特徵貢獻 (log-odds)",
+            "chart.nodeContrib.title.flagged":"此節點為何被標記","chart.nodeContrib.title.topScoring":"P2 分數最高的節點（未達告警門檻）","chart.nodeContrib.sub":"該次預測的特徵貢獻 (log-odds)",
             "chart.cat.caught":"正確告警","chart.cat.falseAlarm":"誤報","chart.cat.missed":"漏報","chart.cat.pending":"待定 (仍在執行)",
             "chart.cat.completed":"完成","chart.cat.failed":"失敗","chart.cat.timeout":"逾時","chart.cat.oom":"記憶體不足",
             "chart.legend.jobs":"任務數","chart.legend.predictedRisk":"預測風險","chart.legend.p2Risk":"P2 風險","chart.legend.contribution":"貢獻",
             "chart.axis.finalState":"最終狀態","chart.axis.riskPct":"風險 (%)","chart.axis.node":"節點","chart.axis.logOdds":"對風險的貢獻 (log-odds)",
+            "chart.trace.title.onset":"節點原始感測軌跡（含 onset 標記）","chart.trace.title.baseline":"節點原始感測軌跡（基線，無 onset）","chart.trace.ps0":"PSU-0 輸入功率","chart.trace.ps0Max":"PSU-0 輸入功率 (每箱最大)","chart.trace.ps0Min":"PSU-0 輸入功率 (每箱最小)","chart.trace.power":"節點總功耗","chart.trace.temp":"GPU0 溫度","chart.trace.powerMax":"總功耗 (每箱最大)","chart.trace.powerMin":"總功耗 (每箱最小)","chart.trace.tempMax":"GPU0 溫度 (每箱最大)","chart.trace.tempMin":"GPU0 溫度 (每箱最小)","chart.trace.axisPower":"功率 (W)","chart.trace.axisTemp":"GPU0 溫度 (°C)","chart.trace.axisTime":"時間 (UTC)","chart.trace.onset":"異常 onset","demo.pick":"示範時點…","demo.flagged":"件告警",
             "chart.ref.jobAlert":"任務告警門檻","chart.ref.nodeAlert":"節點告警門檻","chart.ref.zero":"零",
             // model-LEVEL importance (static panel on the model-info view) -- deliberately worded to
             // separate it from the per-prediction contribution chart in the report
             "mi.importance.h":"模型層級特徵重要性 (Global Feature Importance)",
+            "mi.importance.p2.title":"P2 節點異常模型 — 全域特徵重要性","mi.importance.p2.sub":"由已訓練的 LightGBM booster 直接匯出，非任何單一節點的歸因","mi.importance.p2.metric":"指標：LightGBM 原生 gain — 該特徵所有分裂所降低的訓練損失總和。數值越大代表模型在擬合時越常倚賴此特徵。注意：這與 P3 的排列重要性是「不同的量測」。","mi.importance.p2.axis":"Gain（訓練損失降低總量）","mi.importance.p2.legend":"Gain","mi.importance.incomparable":"⚠ 兩個面板使用不同指標，數值不可互相比較：P3 量測「打亂特徵後準確度下降多少」，P2 量測「模型擬合時用了這個特徵多少」。請勿並列比較兩者的數字大小。",
             "mi.importance.p3.title":"P3 任務結果模型 — 全域特徵重要性",
             "mi.importance.p3.sub":"跨測試集全部預測計算，非任何單一任務的歸因",
             "mi.importance.p3.metric":"指標：排列重要性 — 打亂該特徵後測試集 ROC-AUC 的平均下降幅度（3 次重複取平均）。數值越大代表模型越依賴此特徵。",
@@ -469,13 +474,15 @@
             "chart.jobOutcomeMix.title":"Job outcome mix","chart.jobOutcomeMix.sub":"Jobs that ended in this window, submitted at any time",
             "chart.topFlaggedJobs.title":"Highest-risk flagged jobs","chart.topFlaggedJobs.sub":"In flight, at or above the alert threshold",
             "chart.nodeRiskWatch.title":"Watch-list nodes by P2 risk","chart.nodeRiskWatch.sub":"Against the node alert threshold",
-            "chart.nodeContrib.title":"Why this node is flagged","chart.nodeContrib.sub":"Per-prediction feature contributions (log-odds)",
+            "chart.nodeContrib.title.flagged":"Why this node is flagged","chart.nodeContrib.title.topScoring":"Highest-scoring node (below the alert threshold)","chart.nodeContrib.sub":"Per-prediction feature contributions (log-odds)",
             "chart.cat.caught":"Caught","chart.cat.falseAlarm":"False alarm","chart.cat.missed":"Missed","chart.cat.pending":"Pending (still running)",
             "chart.cat.completed":"Completed","chart.cat.failed":"Failed","chart.cat.timeout":"Timeout","chart.cat.oom":"Out of memory",
             "chart.legend.jobs":"Jobs","chart.legend.predictedRisk":"Predicted risk","chart.legend.p2Risk":"P2 risk","chart.legend.contribution":"Contribution",
             "chart.axis.finalState":"Final state","chart.axis.riskPct":"Risk (%)","chart.axis.node":"Node","chart.axis.logOdds":"Contribution to risk (log-odds)",
+            "chart.trace.title.onset":"Raw node sensor trace (onset marked)","chart.trace.title.baseline":"Raw node sensor trace (baseline, no onset)","chart.trace.ps0":"PSU-0 input power","chart.trace.ps0Max":"PSU-0 input power (bin max)","chart.trace.ps0Min":"PSU-0 input power (bin min)","chart.trace.power":"Total node power","chart.trace.temp":"GPU0 temp","chart.trace.powerMax":"Total power (bin max)","chart.trace.powerMin":"Total power (bin min)","chart.trace.tempMax":"GPU0 temp (bin max)","chart.trace.tempMin":"GPU0 temp (bin min)","chart.trace.axisPower":"Power (W)","chart.trace.axisTemp":"GPU0 temp (°C)","chart.trace.axisTime":"Time (UTC)","chart.trace.onset":"Anomaly onset","demo.pick":"Demo moment…","demo.flagged":"flagged",
             "chart.ref.jobAlert":"Job alert threshold","chart.ref.nodeAlert":"Node alert threshold","chart.ref.zero":"Zero",
             "mi.importance.h":"Global feature importance (model level)",
+            "mi.importance.p2.title":"P2 node-anomaly model — global feature importance","mi.importance.p2.sub":"Exported directly from the trained LightGBM booster; not attributed to any single node","mi.importance.p2.metric":"Metric: LightGBM native gain — the total reduction in training loss across every split made on that feature. Larger means the fit leaned on it more. Note this is a DIFFERENT measurement from P3's permutation importance.","mi.importance.p2.axis":"Gain (total training-loss reduction)","mi.importance.p2.legend":"Gain","mi.importance.incomparable":"⚠ The two panels use different metrics and their numbers are not comparable: P3 measures how much ACCURACY drops when a feature is shuffled; P2 measures how much the fit USED a feature. Do not read one against the other.",
             "mi.importance.p3.title":"P3 job-outcome model — global feature importance",
             "mi.importance.p3.sub":"Measured across every prediction in the test set, not attributed to any single job",
             "mi.importance.p3.metric":"Metric: permutation importance — the mean drop in test-set ROC-AUC when that feature's values are shuffled (averaged over 3 repeats). Larger means the model leans on it more.",
@@ -519,6 +526,29 @@
         // ================= clock =================
         async function clockCmd(a,v){ try{ applyClock(await post('/api/clock',{action:a,value:v})); refresh(); }catch(e){console.error(e);} }
         function doScrub(v){ scrubbing=false; clockCmd('jump_frac', v/1000); }
+        // ---- prepared demo moments --------------------------------------------------------------
+        // The live clock crosses one 15-minute report-cache bucket in 0.25 REAL seconds, so a
+        // prepared report cannot be reached by scrubbing. `goto` lands on the exact virtual second
+        // and holds there, in one server-side operation, which is what makes a committed report
+        // servable on demand. Picking the blank first option returns the clock to live.
+        let demoMoments = [];
+        async function loadDemoMoments(){
+            try{
+                const d = await api('/api/demo_moments');
+                demoMoments = (d && d.moments || []).filter(m => (m.languages||[]).length);
+                const sel = $('demo-moment');
+                if(!demoMoments.length){ sel.classList.add('hidden'); return; }
+                sel.innerHTML = '<option value="">' + t('demo.pick') + '</option>' +
+                    demoMoments.map(m => '<option value="'+m.virtual_ts+'">' +
+                        m.iso.replace('Z','') + ' · ' + m.flagged + ' ' + t('demo.flagged') +
+                        '</option>').join('');
+                sel.classList.remove('hidden');
+            }catch(e){ console.error(e); }
+        }
+        function gotoMoment(v){
+            if(!v){ clockCmd('reset'); return; }
+            clockCmd('goto', parseFloat(v));
+        }
         // The single play/pause control must send the command that matches the SERVER's current state.
         // (It used to be hardwired to 'play', so pausing was impossible however often you clicked it.)
         function togglePlay(){ clockCmd(clockPaused ? 'play' : 'pause'); }
@@ -656,14 +686,74 @@
                     ctx.stroke(); ctx.setLineDash([]);
                     if(rl.text){
                         ctx.fillStyle=col; ctx.font='10px '+CHART_FONT;
-                        if(horiz){ ctx.textAlign='center';
-                                   ctx.fillText(rl.text, Math.min(a.right-24, Math.max(a.left+24,p)), a.top+9); }
+                        if(horiz){
+                            // The label used to sit at a.top+9, i.e. inside the plot, where it
+                            // landed squarely on the tallest bar in the flagged-jobs chart. Put it
+                            // in the padding ABOVE the plot area instead, where no bar can reach,
+                            // and give it a backing plate so it stays legible over gridlines.
+                            ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+                            const x = Math.min(a.right-4, Math.max(a.left+4, p));
+                            const y = Math.max(9, a.top-3);
+                            const w = ctx.measureText(rl.text).width;
+                            ctx.save();
+                            ctx.fillStyle='rgba(5,11,20,0.85)';
+                            ctx.fillRect(x-w/2-3, y-9, w+6, 12);
+                            ctx.restore();
+                            ctx.fillStyle=col;
+                            ctx.fillText(rl.text, x, y);
+                        }
                         else     { ctx.textAlign='right';
                                    ctx.fillText(rl.text, a.right-4, Math.max(a.top+9, p-4)); }
                     }
                     ctx.restore();
                 }
             });
+            // Vertical event marker at an EXACT category index. The index is computed server-side
+            // from the true onset timestamp and handed over, so this is not an approximation of the
+            // position — it is the position. Drawn on the canvas rather than pulling in the
+            // annotation plugin: one more CDN dependency for one line, when the existing plugin
+            // already draws exact rules, is not a trade worth making. No marker is ever drawn when
+            // the server sends none, which is the case whenever no onset was recorded.
+            Chart.register({
+                id:'m100XMarker',
+                afterDatasetsDraw(chart){
+                    const m = (chart.options.plugins||{}).m100XMarker;
+                    if(!m || m.index==null || !chart.scales.x) return;
+                    const a = chart.chartArea, ctx = chart.ctx;
+                    const p = chart.scales.x.getPixelForValue(m.index);
+                    if(p==null || isNaN(p)) return;
+                    const col = 'rgba(244,63,94,0.95)';
+                    ctx.save();
+                    ctx.beginPath(); ctx.setLineDash([6,3]); ctx.lineWidth=2; ctx.strokeStyle=col;
+                    ctx.moveTo(p,a.top); ctx.lineTo(p,a.bottom); ctx.stroke(); ctx.setLineDash([]);
+                    if(m.text){
+                        ctx.font='10px '+CHART_FONT; ctx.textAlign='center';
+                        const w = ctx.measureText(m.text).width;
+                        const x = Math.min(a.right-w/2-2, Math.max(a.left+w/2+2, p));
+                        ctx.fillStyle='rgba(5,11,20,0.9)';
+                        ctx.fillRect(x-w/2-4, Math.max(1,a.top-13), w+8, 12);
+                        ctx.fillStyle=col; ctx.fillText(m.text, x, Math.max(10,a.top-4));
+                    }
+                    ctx.restore();
+                }
+            });
+        }
+        // Two y-axes with their own units, rather than normalising two incomparable quantities onto
+        // one scale. Watts on the left (drawn first and heaviest — the low-power indicator is the
+        // predictive node signal, so it must not read as subordinate to temperature), °C on the
+        // right with its gridlines suppressed so the two lattices do not fight.
+        function dualScales(c, catAxis, grid){
+            const L = c.dual_axis.left || {}, R = c.dual_axis.right || {};
+            const mk = (side, spec, showGrid) => ({
+                position: side, beginAtZero:false,
+                grid: showGrid ? {color:grid} : {drawOnChartArea:false},
+                border:{display:false},
+                title:{display:true, text:labelText(spec.label)},
+                ticks:{ callback:v=>v+(spec.unit||'') }
+            });
+            const x = Object.assign({}, catAxis);
+            if(labelText(c.axis_x)) x.title = {display:true, text:labelText(c.axis_x)};
+            return { x: x, yLeft: mk('left', L, true), yRight: mk('right', R, false) };
         }
         function buildChart(canvas, c){
             const horiz   = (c.type==='hbar' || c.type==='signed_hbar');
@@ -711,6 +801,11 @@
                                 pointHoverRadius: (st.point_radius!=null?st.point_radius+2:5),
                                 pointBackgroundColor: ds.color,
                                 order: (st.order!=null?st.order:1),
+                                borderDash: (st.dash || []),
+                                // dual-axis series say which axis they belong to; watts and °C are
+                                // not comparable numbers, so they are never normalised onto one
+                                yAxisID: (c.dual_axis ? (ds.axis==='right' ? 'yRight' : 'yLeft')
+                                                      : undefined),
                                 fill:false, spanGaps:false
                             });
                         }
@@ -747,10 +842,13 @@
                             : null
                     },
                     scales: (kind==='doughnut') ? {}
+                          : (c.dual_axis ? dualScales(c, catAxis, grid)
                           : (horiz ? { x: valueAxis, y: catAxis }
-                                   : { x: catAxis,   y: valueAxis })
+                                   : { x: catAxis,   y: valueAxis }))
                 }
             };
+            if(c.x_marker) cfg.options.plugins.m100XMarker =
+                { index:c.x_marker.index, text:labelText(c.x_marker.label) };
             return new Chart(canvas.getContext('2d'), cfg);
         }
         function renderCharts(d){
@@ -1079,6 +1177,13 @@
             $('mi-importance-scope').textContent = t('mi.importance.scope');
             // the wording that keeps this apart from the per-prediction chart in the report
             $('mi-importance-vs').textContent  = t('mi.importance.vsPerPrediction');
+            // shown only when there is more than one panel, i.e. when a reader could actually
+            // mistake two different metrics for one comparable scale
+            const inc=$('mi-importance-incomparable');
+            if(panels.length>1 && mi.importance_comparable===false){
+                inc.textContent = labelText(mi.importance_incomparable_note) || '';
+                inc.classList.remove('hidden');
+            } else { inc.classList.add('hidden'); }
 
             panels.forEach((p,i)=>{
                 const n=((p.datasets&&p.datasets[0]&&p.datasets[0].data)||[]).length;
@@ -1115,7 +1220,7 @@
         // ================= boot =================
         (async function init(){
             applyI18n();
-            try{ await loadPolicies(); await loadModelInfo(); }catch(e){ console.error(e); }
+            try{ await loadPolicies(); await loadModelInfo(); await loadDemoMoments(); }catch(e){ console.error(e); }
             await refresh();
             refreshBrief(true);
             setInterval(refresh, 1500);

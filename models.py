@@ -13,6 +13,8 @@ changes which jobs are flagged and which nodes are scored.
 import os, json, sqlite3, threading, datetime
 import pandas as pd, numpy as np
 
+import feature_labels
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
 
@@ -360,6 +362,54 @@ class Store:
             "why": why, "why_kind": "global",
         }
 
+    # -------------------------------------------------- NATIVE-RESOLUTION IPMI TRACE
+    # node_raw is an ADDITIVE table written by build_node_raw.py: one row per node per ~20 s, the
+    # native ExaData sampling rate, versus node_slots' 15-minute means. It covers only a roster of
+    # nodes (those with a recorded onset, plus a couple of baseline nodes) -- see that script for
+    # why. Every method here degrades to "no coverage" rather than raising when the table is absent,
+    # so a store built before this existed still serves.
+    def has_node_raw(self) -> bool:
+        try:
+            return bool(self._scalar("SELECT COUNT(*) FROM sqlite_master "
+                                     "WHERE type='table' AND name='node_raw'"))
+        except Exception:
+            return False
+
+    def node_raw_nodes(self) -> set:
+        """Which nodes have a native-resolution trace at all."""
+        if not self.has_node_raw():
+            return set()
+        try:
+            return {int(r[0]) for r in self.db.execute("SELECT DISTINCT node FROM node_raw")}
+        except Exception:
+            return set()
+
+    def node_raw_trace(self, node_id: int, lo: int, hi: int):
+        """Native-resolution rows for one node in [lo, hi]. Empty frame when there is no coverage.
+
+        `ps0_w` is PSU-0 input power, the quantity the P2 triage actually runs on. It arrived after
+        the table did, so a store built by the earlier two-metric builder has no such column: it is
+        filled with NaN rather than raising, and the renderer then falls back to total power exactly
+        as it did before.
+        """
+        cols = ["ts", "power_w", "temp_c", "ps0_w"]
+        if not self.has_node_raw():
+            return pd.DataFrame(columns=cols)
+        have = self.node_raw_columns()
+        select = ", ".join(c if c in have else f"NULL AS {c}" for c in cols)
+        return self._df(f"SELECT {select} FROM node_raw "
+                        "WHERE node=? AND ts>=? AND ts<=? ORDER BY ts",
+                        (int(node_id), int(lo), int(hi)))
+
+    def node_raw_columns(self) -> set:
+        """Which columns this store's node_raw actually has."""
+        if not self.has_node_raw():
+            return set()
+        try:
+            return {str(r[1]) for r in self.db.execute("PRAGMA table_info(node_raw)")}
+        except Exception:
+            return set()
+
     def node_detail(self, node_id: int, t: int, policies: dict):
         lo = t - NODE_MAXAGE_H * 3600
         d = self._df("SELECT * FROM node_slots WHERE node=? AND ts<=? AND ts>=? ORDER BY ts DESC LIMIT 1",
@@ -375,9 +425,10 @@ class Store:
         state = "CRITICAL" if crit else ("WARNING" if flagged else "HEALTHY")
         # INPUT -- curated real IPMI-derived feature values
         inp = []
-        for f, en, zh in self.p2_curated:
+        for f, _en, _zh in self.p2_curated:
             v = r[f] if f in d.columns else None
             v = None if (v is None or pd.isna(v)) else float(v)
+            en, zh = feature_labels.label(f)     # one resolver for both blocks, so they agree
             inp.append({"feature": f, "label_en": en, "label_zh": zh,
                         "value": (round(v, 3) if v is not None else None), "null": v is None})
         # WHY -- per-prediction LightGBM contributions (signed, log-odds space)
@@ -388,7 +439,9 @@ class Store:
             contrib = []
         for idx, value, c in contrib:
             name = self.p2_feats[idx] if 0 <= idx < len(self.p2_feats) else f"f{idx}"
-            en, zh = self.p2_label.get(name, (name, name))
+            # Compositional labels cover all 363 features. This used to be a 20-entry dict lookup
+            # with the raw identifier as the fallback, so 343 of them rendered as `slope30m_p0P`.
+            en, zh = feature_labels.label(name)
             why.append({"feature": name, "label_en": en, "label_zh": zh,
                         "value": round(float(value), 3), "contribution": round(float(c), 4),
                         "direction": "increases" if c > 0 else "decreases"})

@@ -87,9 +87,35 @@ check("keys became markdown headings", "## Executive summary" in d["text"], )
 check("known keys are in canonical order",
       d["text"].index("## Executive summary") < d["text"].index("## Risk assessment")
       < d["text"].index("## Recommended actions"))
-check("unknown key title-cased and appended, not dropped",
-      "## Unexpected extra key" in d["text"]
-      and d["text"].index("## Unexpected extra key") > d["text"].index("## Recommended actions"))
+# CONTRACT CHANGE: the heading vocabulary is now CLOSED. An unrecognised key used to be
+# title-cased into its own heading, which is how a report grew "## Executive summary part2" from an
+# `executive_summary_part2` key. The PROSE is still kept -- it is real report content -- but it is
+# merged into the section above rather than given an invented heading, and an advisory records it.
+check("unknown key does NOT become an invented heading",
+      "## Unexpected extra key" not in d["text"], d["text"][-200:])
+check("   ...but its prose is preserved, not dropped",
+      "must be appended, not dropped" in d["text"])
+check("   ...and an advisory names it",
+      any(a["code"] == report.ADV_SECTION and "unexpected_extra_key" in a["message"]
+          for a in d["advisories"]), str([a["code"] for a in d["advisories"]]))
+check("only vocabulary headings appear",
+      all(h.lstrip('# ').strip() in
+          {report._pretty_key(s, True) for s in report._SECTION_TITLES}
+          for h in d["text"].split("\n") if h.startswith("## ")),
+      str([h for h in d["text"].split("\n") if h.startswith("## ")]))
+
+# the exact observed defect: one section split across two keys
+d2 = run(json.dumps({
+    "executive_summary": "Cluster submitted 1501 jobs.",
+    "executive_summary_part2": "A second chunk that used to get its own heading.",
+}, ensure_ascii=False))
+check("`executive_summary_part2` is merged, not given a heading",
+      "part2" not in d2["text"] and "## Executive summary" in d2["text"], d2["text"][:160])
+check("   both halves survive in one section",
+      "1501 jobs" in d2["text"] and "second chunk" in d2["text"])
+check("   an advisory is raised, and it is NOT a hard-gate failure",
+      d2["mode"] == "llm" and any(a["code"] == report.ADV_SECTION for a in d2["advisories"]),
+      f"{d2['mode']} {[a['code'] for a in d2['advisories']]}")
 check("list value rendered as bullets", "- Inspect node0697 in rack 34." in d["text"])
 check("guardrail ran and passed", d["numeric_check"]["checked"] and d["numeric_check"]["ok"])
 

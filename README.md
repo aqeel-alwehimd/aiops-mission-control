@@ -144,12 +144,13 @@ answer, surfaced in the Policies tab under *模型資訊與資料透明度*.
 | `GET /api/logs` | recent auto-healing / event log lines |
 | `GET /api/jobs/{job_id}` | **drill-down**: one job's real input features, model output, and (global) attribution |
 | `GET /api/nodes/{node_id}` | **drill-down**: a node's real IPMI inputs, output, and per-prediction contributions at the current virtual time |
-| `GET`/`POST /api/clock` | read / control the replay (play, pause, step, reset, speed, jump, jump_frac) |
+| `GET`/`POST /api/clock` | read / control the replay (play, pause, step, reset, speed, jump, jump_frac, **goto**). `goto` sets the virtual time *and pauses* atomically — the live clock crosses one 15-minute report-cache bucket in 0.25 real seconds, so it is the only way to land on a prepared moment and stay there |
 | `GET`/`POST /api/policies` | read / update settings **in memory** (never written to disk) |
 | `POST /api/policies/reset` | restore the seeded default policies (in memory) |
 | `GET /api/model_info` | model names, metrics, training windows, feature counts, methodology, and the explicit unavailable-fields list |
 | `GET /api/report` | auto-generated operations report at the current virtual time — params `window` (lookback hours), `lang` (`en`/`zh`), `length` (`brief`/`full`); returns the generated `text`, the `mode`, the underlying `facts` JSON, `charts` (fully computed labels + datasets per selected chart, in draw order) and `charts_unavailable` (selected but not drawable, with the reason). `charts` is populated for `length=full` only. |
 | `GET /api/heroes` | guided-tour anchors (hero IDs + virtual timestamps to jump to), from `data/hero_examples.json` |
+| `GET /api/demo_moments` | prepared demo moments (virtual timestamps with a committed, pre-generated LLM report), from `data/demo_moments.json`; empty list when no reports have been prepared |
 | `GET /health` | liveness probe → `{"status":"ok"}` |
 
 ### Policies actually change the tabs
@@ -304,13 +305,80 @@ number is a real fact and the sentence is false. The ring is now three segments 
 `flagged_total` (stated in the subtitle and asserted in tests); misses are surfaced as a labelled
 footnote beside it, with a note saying why they are not a slice.
 
+**Feature labels are compositional, not a lookup table.** `feature_labels.py` decomposes a model
+feature name into a statistic and a base sensor (`slope30m_p0P` → CPU-0 power, 30-minute trend) and
+composes a bilingual label from two small tables — 40 sensors × ~28 statistics covers all 363 P2
+features. It replaced a 20-entry dict whose fallback was the raw identifier, so 343 features rendered
+as `fleetmax_nz_g0_cT`. Units live on the base sensor and are printed only after statistics that
+preserve them (a mean of watts is watts; a slope and a z-score are not). Sibling features that used
+to look like duplicates — `s30m_p0_vddT` vs `slope30m_p0_vddT`, `slope30m_totP` vs `slope30m_p0P` —
+are distinct model features at distinct indices, and composition names the sensor *and* the
+statistic so they can never collapse into the same text. A feature this module cannot name is a
+**build failure** in `verify_labels.py`, not a silent fallback.
+
+**The heading vocabulary is closed.** The agent once returned `executive_summary_part2`, which
+composition title-cased into a literal "Executive summary part2" heading. `_SECTION_TITLES` is now
+the whole vocabulary: the prompt states it, and `compose_markdown()` canonicalises an
+off-vocabulary key onto the section it names (or merges it into the section above), keeping the
+prose, dropping the invented heading, and raising an `off_vocabulary_section` advisory. Not a
+hard-gate failure — the prose was fine, only the structure was wrong.
+
 **A renderer that cannot answer honestly says so.** It returns *unavailable* with a reason rather
 than an empty or misleading chart, and no data point is ever padded or invented to fill one. Those
 appear in `charts_unavailable` on the response and are listed under the panel. Two refusal classes:
 `no_rows` (nothing to plot) and `degenerate` — most importantly `node_risk_watch`, which refuses when
 every watch-list node scores below `NODE_RISK_MIN_FRACTION_OF_ALERT` (25 %) of the alert threshold,
-because three stubs beside a reference line four times their height tell an operator nothing. On a
-quiet shift that chart is *supposed* to be absent.
+because a reference line at 50% pins the axis and flattens a 3% bar into a stub.
+
+Retuned 2026-08-03 against a 40-point sweep. Measured top watch-node score: median 2.90%, max
+61.50% against a 50% threshold; at the old 0.25 constant the chart rendered at 8/40 points. The
+picture, not the low scores, was the problem: the chart now drops the reference LINE when nothing is
+near the threshold, scales the axis to the data so the ranking is legible, and states the gap in
+words ("all below the 50% threshold — highest is 5.80%, 12% of the way to it"). With the line gone
+there is no reason to hide a real ranking, so the constant is 0.10 and it renders at 14/40 (35%).
+Below that the ordering is noise-floor jitter and it still refuses.
+
+**Native-resolution sensor trace.** `node_sensor_trace` plots one node's raw total power and GPU-0
+temperature at the **20-second** native IPMI cadence, against `node_slots`' 15-minute means. The data
+comes from an ADDITIVE table, `node_raw`, written by `build_node_raw.py`: it opens the existing store,
+creates one new table, and fingerprints every pre-existing table before and after to prove nothing
+else moved. Coverage is the 10 onset nodes at ±3 h around their onset plus two baseline nodes across
+the window — **35,417 rows, +1.22 MB (+2.5%)**, against an 8 MB budget. Two y-axes with units rather
+than normalising; power is drawn heaviest because the low-power indicator is the predictive node
+signal. No smoothing. Above `MAX_TRACE_POINTS` the series is binned to a **min/max envelope**, never
+averaged — an average erases exactly the transients the chart exists to show.
+
+**The PSU-0 series, and the claim that it did not exist.** This section previously stated that the
+raw extract contained no PSU input-power metric at all, so `cur_ps0_inputP` — the signal P2 actually
+triages on — could not be reconstructed and the trace plotted total node power instead. That was true
+of the *extracted directory* and **false of the source**.
+`D:/M100/data/raw_2209_extracted/` holds **24 of the 104 `ipmi_pub` metrics** in
+`D:/M100/data/22-09.tar`; `ps0_input_power` is one of the 80 that were never unpacked. It is in the
+tar at the same **20-second native cadence**, 980 nodes, 83.4 MB. The earlier search looked in the
+unpacked subset and read its absence there as absence everywhere.
+
+The trail runs backwards from the feature name, and the sensor is not spelled the way the feature is
+— feature names here are compositional:
+
+| Layer | Name |
+|---|---|
+| P2 model feature | `cur_ps0_inputP` (`precompute.py` reads it from `p09_test.parquet`) |
+| aggregated 15-min column | `ps0_input_power_avg` — listed in `BROAD` in `P2_09_full_scale_rebuild.ipynb` cell 17, whose `short()` maps `_avg` → `""` and `_power` → `"P"` |
+| raw `ipmi_pub` metric | **`ps0_input_power`** — never renamed, simply not extracted |
+
+`node_raw` therefore carries a third column, `ps0_w`, and **PSU-0 input power is now the primary
+series on the trace**, drawn heaviest, with total node power kept behind it as context on the same
+watt axis (both are watts; a second axis for them would let a reader compare two shapes not drawn to
+the same scale). Cost: `demo_lite.sqlite` **49.0 → 49.2 MB (+0.13 MB)**, `demo.sqlite` +4.78 MB, both
+inside the 8 MB budget, with all four pre-existing table fingerprints verified unchanged before and
+after. The roster and `MAX_ONSET_SPANS` were not touched. A store built by the earlier two-metric
+builder has no `ps0_w`; `node_raw_trace()` fills it with NULL and the renderer falls back to total
+power and says so in the subtitle.
+
+The other honesty point is unchanged: a node often **stops reporting before its own onset**
+(node0038's last sample is 8m20s early). Snapping the marker to the nearest sample would move the
+event to whenever the node last spoke, so the axis is instead extended to the true onset with empty
+slots: the line visibly stops, the gap is the story, and the marker sits on the real timestamp.
 
 **Global importance is a static panel, not a report chart.** `charts.model_importance_panels()` is
 served on `/api/model_info` and drawn once in the model-info view. It is deliberately **outside the
@@ -318,18 +386,27 @@ served on `/api/model_info` and drawn once in the model-info view. It is deliber
 id. The panel names its metric (permutation importance, mean ROC-AUC drop) rather than showing a bare
 number, and carries explicit bilingual text separating it from `node_feature_contributions`: one is
 the model's average reliance across all predictions (unsigned, fixed), the other is one node's one
-slot (signed log-odds, different every slot). **P2 has no panel** — see the table above — and is
-reported as unavailable with the reason. Averaging the stored per-slot contributions would produce a
-biased local average, not a global importance, so it is refused rather than improvised.
+slot (signed log-odds, different every slot). **Both models now have a panel, with DIFFERENT metrics** — and the UI says so rather than letting
+them be read against each other. P3 is permutation importance (mean test ROC-AUC drop when a feature
+is shuffled: how much *accuracy* depends on it). P2 is LightGBM **native gain** (total training-loss
+reduction across splits on that feature: how much the fit *used* it), exported by
+`export_p2_importance.py` — a free export the trained booster already carries, 0.2 ms once loaded, no
+re-fit and no permutation pass. `importance_comparable: false` drives a warning above the panels.
+Still refused: averaging the stored per-slot contributions, which would be a biased local average
+over a sample skewed towards anomalous nodes, not a global importance.
 
 **Caption vs its own chart** (advisory, non-blocking, at the reviewer-agent seam).
 `caption_consistency_review()` checks each agent-written caption against `chart_numbers()` — that
 chart's plotted values, labels, reference line, axis bound, footnote and bar count. The hard gate
 asks only "is this number a fact somewhere?", which is the right test for the body and too weak for a
 caption scoped to one picture. Documented limit: it tests membership, not grammar, so a false
-*relation* between two numbers that both appear on the panel is invisible to it. That class is
-handled structurally (misses are no longer a slice) and by the prompt, and belongs to the reviewer
-agent.
+*relation* between two numbers that both appear on the panel is invisible to it.
+
+That limit is now partly closed rather than only deferred. `cohort_containment_review()` (see the
+auditor section) resolves each number back to the **cohort its fact key names** and flags a sentence
+that nests two cohorts which do not nest — the exact case this check cannot see — and it covers the
+narrative body as well as captions. What remains genuinely out of reach for deterministic code is a
+false containment stated without numbers, which is the auditor's.
 
 Axis labels, legends, category names and reference-line labels travel as i18n **references**
 (`{"key": …}`), or as bilingual pairs when they come from the database (`{"en": …, "zh": …}`), so the
@@ -340,6 +417,93 @@ EN/中文 toggle relabels a chart without a second API call. Captions come from 
 A second LaplaceAI agent reviews the narrative against the facts. It is **advisory only**: it never
 blocks, never changes `mode`, and never decides whether a report is served. A dead, slow or
 cooling-down auditor degrades to a normal report carrying an advisory flag.
+
+#### What was wrong with it, measured
+
+Live testing across four virtual timestamps produced five narratives containing **four confirmed
+false claims**. The auditor returned `is_valid: true` on all five. Two were the exact class it
+existed to catch — a resolved-failure count described as sitting *within* the flagged cohort, when
+that count includes misses which by definition were never flagged. One was a caption asserting most
+flagged jobs had been caught when 17 % had and 71 % were still pending, containing **no numbers at
+all**. One said "four TIMEOUT-predicted jobs" where there were six, **written as a word**.
+
+The only layer catching anything was the one that is not an LLM: `caption_chart_mismatch` fired
+three times on real scope errors — and it inspects captions only, while three of the four instances
+above were in the narrative body.
+
+The architecture was sound; the **contract** was wrong, in five ways, and each is now answered:
+
+| Defect | Fix |
+|---|---|
+| Returned one boolean over ~600 words, with the `true` variant offered first. "Valid" was the cheap answer. | Output is a **list of findings**, each quoting the span it objects to, naming the fact it contradicts, and carrying a severity. An empty list is still the pass condition, but it must be paid for with a populated `relational_claims_checked` list. |
+| Asked it to "verify numbers and facts match" — precisely what the deterministic hard gate already does, perfectly, *before* the auditor runs. | The prompt now states outright that **every number is already verified** and that re-checking existence is not its job. |
+| Facts arrived as a bare JSON dump. The cohort identities live in Python and it was never told they exist. | `cohort_prose(facts)` is injected alongside the JSON, generated from the **same structures `verify_cohort.py` asserts**, so prompt and tests cannot drift. |
+| No example of the target failure class, though documented instances existed. | Four worked examples of real false claims with the reason each is false, **plus a correct narrative as a counter-example** so it is not simply taught to object. |
+| Audited the narrative only; captions were structurally invisible. | The agent's own captions are passed in from `selection` and audited under the same rules. |
+
+The prompt now names the five relational classes it is responsible for: **containment**, **wrong
+denominator**, **unsupported causation**, **qualitative contradiction with no number present**, and
+**material omission of bad news that is in the facts**.
+
+Everything about *how* it is called is unchanged and asserted in `verify_auditor.py`: `invoke_agent`,
+its own cooldown namespace, its own retry profile (2 attempts / 75 s deadline / **60 s** per-attempt
+timeout — a 15 s one answered 0 of 5), `mode == "llm"` and `length == "full"` only, inside
+`REPORT_TIME_BUDGET`, seven distinct advisory codes, fail-open throughout. The previous
+single-boolean reply shape is still parsed rather than discarded as unparseable.
+
+#### Measured, against a rule fixed before the fixtures were run
+
+`measure_auditor.py`, 7 known-false narratives and 6 clean ones, 3 runs each, 39 live calls, all 39
+answered (median latency 38.7 s, max 48.2 s). The rule was pre-committed:
+**SUCCESS = catch ≥ 60 % and false positives ≤ 25 %.**
+
+| | measured | threshold | |
+|---|---:|---:|---|
+| **Catch rate** | **100.0 %** (21/21) | ≥ 60 % | every false fixture, every run |
+| **False-positive rate** | **83.3 %** (15/18) | ≤ 25 % | **fails** |
+
+**Verdict by the pre-committed rule: PARTIAL.** It beats the 0-of-5 baseline decisively on detection
+and misses badly on noise. All seven false fixtures were caught 3/3 — including the two the numeric
+gate structurally cannot see (a caption with **no numbers at all**, and a quantity **written as a
+word**). No run returned an empty `relational_claims_checked` list; the median was 8 claims examined.
+
+The false positives have one cause, and it is worth stating precisely rather than averaging away.
+**All 16 high/medium findings on clean narratives were the MATERIAL OMISSION class** — "five node
+onsets are in the facts and the narrative does not mention them". **Zero** were containment,
+denominator, causation or qualitative contradiction. The only clean fixture that survived (0/3
+flagged) was the one that reports every piece of bad news in the facts. So the auditor is executing
+class (e) exactly as written and is aggressive about it, while the four *falsehood* classes produced
+no noise at all.
+
+That result is reported as measured and the prompt has **not** been tuned to improve it. What it
+does change is where the finding is allowed to block: `prewarm_reports.py --demo` gates a cached
+demo report on the deterministic containment check, which is what proves a claim false, and treats
+auditor findings as notes for a human. An omission is an incompleteness, not a falsehood; blocking
+on it would discard almost every real report and catch nothing untrue.
+
+#### A deterministic version of the same class
+
+`cohort_containment_review()` (advisory code `cohort_containment`) catches part of this class in
+**pure Python**, with no model involved. The facts' key names already carry the cohort, so if a
+sentence puts quantity A inside quantity B and `SET_OF_KEY` says their sets do not nest, the sentence
+is false and code can prove it. Three conditions, all required:
+
+1. both numbers resolve **unambiguously** to one set — every key holding the value maps to the same
+   set *and* the value occurs nowhere else in the facts tree. `correct_warnings` is deliberately
+   never resolvable: it genuinely belongs to two sets, being their intersection;
+2. the pair appears in `COHORT_NON_CONTAINMENT`, so sets that legitimately nest are never flagged;
+3. a containment cue links them in one of four phrasings (`inner CUE outer`, `outer CUE inner`,
+   `outer … inner CUE <anaphor>`, `CUE outer … inner`), on an **adjacent** number pair, with no
+   separator (`;`, "separately", "never", "but") in the gap.
+
+Restricting to "inner CUE outer" alone caught 1 of 7 documented claims — English puts the cue before
+or after the pair at least as often. Adjacency is what stops the documented false positive:
+*"Of the 331 flagged jobs, 108 were caught; separately, 47 failures were never flagged"* is true, and
+the semicolon, "separately" and "never" all drop it.
+
+**What it structurally cannot do**: it needs two numbers. A false containment stated in words alone —
+"most of the flagged jobs have already been caught" — carries nothing to resolve. That class belongs
+to the auditor.
 
 Both agents now go through **one** resilient path, `invoke_agent()` — retry with jittered backoff,
 error-class-aware handling, and a circuit breaker — with a per-agent profile (the narrator gets 3
@@ -366,7 +530,10 @@ to discard spends a call on text nobody reads, and the brief report is polled ev
 response now carries an `auditor` block (`ran`, `state`, `is_valid`, `reason`, `latency_s`,
 `advisory_code`) and each outcome has its own advisory code: `auditor_flag`,
 `auditor_no_credentials`, `auditor_failed`, `auditor_timeout`, `auditor_cooldown`,
-`auditor_unparseable`, `auditor_skipped_budget`.
+`auditor_unparseable`, `auditor_skipped_budget`. A flagged audit now raises **one advisory per
+finding**, each carrying the quoted span, the severity and the fact it contradicts, because an
+operator's next action is to look at the text — a single collapsed sentence was the right shape for a
+boolean and the wrong one for a list.
 
 `REPORT_AUDIT=0` disables the second agent entirely without touching its credentials; the
 verification suites that are not about it set this so they can never make a live call.
@@ -398,6 +565,66 @@ raising the client timeout cannot help. Three things absorb it:
   **3,726 → 2,740 characters, 26 % smaller**, and 17 % off the whole prompt. The **full** facts are
   still used for the numeric guardrail and the raw-facts panel, so a report quoting something that
   was trimmed out of the prompt still validates.
+
+#### Reaching a prepared moment at all: the clock arithmetic
+
+`cache_key()` buckets the virtual time to `CACHE_BUCKET` (900 virtual seconds). `VirtualClock._base_vt`
+is stateless — `win_start + ((now - BASE_EPOCH) * 3600) % span` — and the served window is 72 virtual
+hours. So at the default 3600×:
+
+* the live clock **crosses the entire replay window every 72 real seconds**;
+* each 15-minute cache bucket is the current one for **0.25 real seconds**.
+
+A prepared report is therefore not permanently dead — it recurs every 72 s — but a quarter-second
+target is not something anyone can demonstrate. `jump` alone does not fix it either: `_ensure_manual()`
+seeds the override with `paused: False`, so a jump starts a manual clock that immediately runs at
+3600× and leaves the bucket in the same quarter second, and pausing separately is a second HTTP call
+with the clock running in between.
+
+The smallest change that gives a pin is one new action: **`POST /api/clock {"action":"goto","value":<ts>}`**
+sets the virtual time and pauses **inside one acquisition of the lock**, so the landing is exact.
+Nothing else changes — `play`, `pause`, `step`, `speed`, `jump`, `jump_frac` keep their behaviour and
+`reset()` still drops the override and returns to the shared wall-clock position, so a demo pin
+cannot outlive a restart. `GET /api/demo_moments` serves the prepared list from
+`data/demo_moments.json`, and the UI's demo-moment selector calls `goto` with it; no timestamp is
+hardcoded in the frontend.
+
+#### Disk persistence does not survive Render, so demo reports are committed artefacts
+
+`_disk_save()` writes `data/report_cache.json` next to the code. Render's native runtime gives an
+**ephemeral container filesystem**: it survives within a running instance, but the free plan spins
+down after 15 minutes idle and a redeploy replaces the container, so a runtime-written file is gone
+either way — and a prewarm run on a laptop never reaches production at all. A runtime cache is
+therefore the wrong mechanism for a demo.
+
+No code change was needed to load them, only to *ship* them: `_cache_get()` already falls through to
+`_disk_load()` on a miss, prewarmed entries ignore the TTL, and `data/report_cache.json` is not
+git-ignored. So the prepared reports are **generated locally and committed**, and the deployed
+instance serves them from the repo on every cold start. `_disk_load()` is now memoised on
+`(mtime, size)` — with the file permanently present and around a megabyte, the brief report's ~12 s
+poll would otherwise re-parse it several times a minute.
+
+```bash
+python prewarm_reports.py --demo     # the four sweep-selected moments, EN + ZH, retried until each
+                                     # is an LLM report that passes the relational content check
+```
+
+> **Status: `data/report_cache.json` is currently EMPTY, and that is not a code problem.** The
+> LaplaceAI endpoint degraded partway through this work and has not recovered: **~34 consecutive
+> narration attempts all failed** with `HTTP 504 ×2` then a read timeout, across two runs and about
+> 85 minutes of endpoint time. The failure is payload-dependent rather than a total outage — a
+> 104-byte probe to the *same* endpoints answers HTTP 200 in 28–43 s, while the ~4 KB report prompt
+> times out every time, which matches the documented 504 cause ("the agent exceeded their internal
+> limit"). `verify_demo_path.py --mock` proves the serving path works and will serve the moment
+> `--demo` can complete; nothing about the demo path needs changing when the endpoint returns.
+
+`--demo` differs from a plain prewarm in two ways that matter. It **retries until the agent
+succeeds**, because a template loses the AI-generated badge and with it the point of the
+integration. And it **vets content before blessing anything**: the deterministic containment check
+first, then the auditor's findings, and any candidate with a high/medium finding is discarded and
+regenerated rather than quietly cached. A cached report is served for as long as it is committed, so
+a fluent narrative containing a false claim would be pinned into the demo permanently — strictly
+worse than a template.
 
 **Before a demo, prewarm the cache** so the demo path never depends on a live call:
 
@@ -448,6 +675,10 @@ printed to a cp1252 console.
 | `verify_narration.py` | reply-shape post-processing (JSON contract, plain markdown, meta-commentary) |
 | `verify_fallback.py` | `fallback_reason` wording, caching policy, circuit breaker |
 | `verify_resilience.py` | retries, error-class cooldowns, prompt trimming, secret hygiene |
+| `verify_labels.py` | **the label tripwire**: every P2/P3 feature resolves to a human name (a missing mapping fails the build, it does not fall through to the raw identifier); no two features share a label; units survive only on unit-preserving statistics; the contributions panel never claims a node is flagged when it is not |
+| `sweep_report.py` | not a unit suite — walks the virtual clock across the whole replay period (default 40 points), asserts every invariant at each, and writes `data/sweep_report.{csv,md}` with per-chart render rates and suggested demo timestamps |
+| `verify_demo_path.py` | the prepared demo path end to end, in-process via `TestClient` and with the agent credentials stripped from the environment: `goto` lands on the exact virtual second and holds through a real pause, the key the server computes matches the one prewarm wrote, every moment serves `mode == "llm"` from disk with `cached`/`prewarmed` set and the full chart set, **zero outbound calls**, and `reset` returns the clock to live. `--mock` builds a throwaway cache at a scratch path so the plumbing is testable when the endpoint is down — it never touches the committed `data/report_cache.json` |
+| `measure_auditor.py` | **not a suite either — it makes live agent calls and reports rates.** 7 known-false narratives (the 4 confirmed live failures + 3 earlier documented instances) and 6 clean ones, all anchored to real facts at real virtual timestamps so every number in them passes the hard gate exactly as the live failures did. Reports catch rate and false-positive rate against a decision rule fixed *before* the fixtures were run, and separately scans 160 `render_template()` outputs — correct by construction — as a false-positive corpus for the deterministic check. `--det-only` runs the Python layer with no network. |
 | `verify_auditor.py` | the second agent is advisory: timeout / 504 / 429 / malformed JSON / disagreement / no credentials all still serve the report with `mode` unchanged and the right advisory code; the auditor is skipped for `brief` and for gate-rejected drafts; an auditor failure never cools down the narrator |
 
 ## Deployment (Render, free tier, native Python — no Docker)

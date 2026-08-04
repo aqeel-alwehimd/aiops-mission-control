@@ -216,6 +216,134 @@ def assemble_facts(store, t: int, policies: dict, window_h: float = 6) -> dict:
     }
 
 
+# ============================================================ 1b. THE COHORT MODEL
+#
+# ONE definition of which quantity counts members of which set, and of the identities and
+# non-containments that hold between them. It has three consumers, and that is the whole point:
+#
+#   * cohort_prose()            renders it as English prose for the AUDITOR PROMPT, so the second
+#                               agent is told the relationships instead of being handed a bare JSON
+#                               dump and expected to infer them;
+#   * cohort_containment_review() resolves a number in the narration back to its SET, so a false
+#                               containment can be caught in deterministic Python;
+#   * verify_cohort.py          asserts every identity below against the real store, at every
+#                               sample point.
+#
+# Sourcing all three from here is what stops the prompt's claims and the test's assertions drifting
+# apart. Add a bucket to assemble_facts and it must be registered here or verify_cohort.py fails.
+#
+# The failure class this exists for: `misses` and `flagged_total` are both real facts, so the numeric
+# hard gate passes a sentence that says one is inside the other -- and that sentence is false, because
+# a missed failure is by definition one that was never flagged.
+SET_SUBMITTED = "submitted"           # every job whose SUBMIT time falls in the window (cohort S)
+SET_FLAGGED   = "flagged"             # the subset of S that P3 warned about at submission
+SET_FAILED    = "failures_resolved"   # the subset of S that has ENDED and did not COMPLETE
+SET_ENDED     = "ended_in_window"     # jobs whose END time falls in the window (cohort E)
+
+SET_LABEL = {
+    SET_SUBMITTED: "the jobs submitted in this window",
+    SET_FLAGGED:   "the jobs P3 flagged at submission",
+    SET_FAILED:    "the submitted jobs that have ended and failed",
+    SET_ENDED:     "the jobs that ended in this window (whenever they were submitted)",
+}
+
+# fact key path -> the set whose members it counts. A key may belong to two sets: correct_warnings
+# is exactly the INTERSECTION of flagged and failed, which is why it is the only quantity that may
+# legitimately be described as being in both.
+SET_OF_KEY = {
+    "jobs_window.submitted":                        (SET_SUBMITTED,),
+    "jobs_window.submitted_outcome_known":          (SET_SUBMITTED,),
+    "jobs_window.submitted_still_running":          (SET_SUBMITTED,),
+    "jobs_window.flagged_at_submission":            (SET_FLAGGED,),
+    "prediction_outcomes.flagged_total":            (SET_FLAGGED,),
+    "prediction_outcomes.correct_warnings.count":   (SET_FLAGGED, SET_FAILED),
+    "prediction_outcomes.false_alarms.count":       (SET_FLAGGED,),
+    "prediction_outcomes.pending_outcome.count":    (SET_FLAGGED,),
+    "prediction_outcomes.failures_resolved":        (SET_FAILED,),
+    "prediction_outcomes.misses.count":             (SET_FAILED,),
+    "jobs_window.ended_in_window":                  (SET_ENDED,),
+    "jobs_window.ended_in_window_failed":           (SET_ENDED,),
+    "jobs_window.ended_in_window_timeout":          (SET_ENDED,),
+    "jobs_window.ended_in_window_oom":              (SET_ENDED,),
+    "jobs_window.ended_in_window_completed":        (SET_ENDED,),
+}
+
+# (parts, whole) -- the parts sum EXACTLY to the whole, always, at every virtual time.
+COHORT_IDENTITIES = [
+    (("prediction_outcomes.correct_warnings.count",
+      "prediction_outcomes.false_alarms.count",
+      "prediction_outcomes.pending_outcome.count"), "prediction_outcomes.flagged_total"),
+    (("prediction_outcomes.correct_warnings.count",
+      "prediction_outcomes.misses.count"),          "prediction_outcomes.failures_resolved"),
+    (("jobs_window.submitted_outcome_known",
+      "jobs_window.submitted_still_running"),       "jobs_window.submitted"),
+]
+
+# (inner, outer, why) -- `inner` is NOT a subset of `outer`, so no sentence may place it inside.
+COHORT_NON_CONTAINMENT = [
+    ("prediction_outcomes.misses.count", "prediction_outcomes.flagged_total",
+     "a missed failure is by definition one P3 did NOT flag, so a miss is never among the flagged "
+     "jobs"),
+    ("prediction_outcomes.failures_resolved", "prediction_outcomes.flagged_total",
+     "failures_resolved counts caught AND missed failures together, so it is not a slice of the "
+     "flagged jobs"),
+    ("jobs_window.ended_in_window", "jobs_window.submitted",
+     "a job that ended in this window may have been submitted long before it, so the ended count is "
+     "not part of the submitted count"),
+    ("jobs_window.ended_in_window_failed", "prediction_outcomes.flagged_total",
+     "the ended-in-window failures are a different cohort from the jobs flagged at submission; "
+     "neither contains the other"),
+]
+
+
+def _fact_at(facts, path):
+    """facts['a']['b']['c'] for path 'a.b.c'. None if any hop is missing."""
+    cur = facts
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def cohort_prose(facts) -> str:
+    """The cohort model as prose, with THIS report's values substituted in.
+
+    The auditor is given this alongside the JSON so the relationships are stated rather than left to
+    be inferred from key names. Every line is generated from the structures above, so the prompt can
+    never claim an identity verify_cohort.py does not assert.
+    """
+    def v(path):
+        x = _fact_at(facts, path)
+        return "n/a" if x is None else x
+
+    L = ["The counts below are memberships of four DIFFERENT sets of jobs. Which set a quantity "
+         "belongs to is carried by its key name:"]
+    by_set = {}
+    for key, sets in SET_OF_KEY.items():
+        for s in sets:
+            by_set.setdefault(s, []).append(key)
+    for s in (SET_SUBMITTED, SET_FLAGGED, SET_FAILED, SET_ENDED):
+        L.append(f"  - {SET_LABEL[s]}: {', '.join(sorted(by_set.get(s, [])))}")
+    L.append("")
+    L.append("These sums are exact at every report time, and this report is no exception:")
+    for parts, whole in COHORT_IDENTITIES:
+        lhs = " + ".join(f"{p.rsplit('.', 1)[0].split('.')[-1] if p.endswith('.count') else p.split('.')[-1]}={v(p)}"
+                         for p in parts)
+        L.append(f"  - {lhs}  =  {whole.split('.')[-1]}={v(whole)}")
+    L.append("")
+    L.append("These containments DO NOT hold. A sentence placing the first quantity inside the "
+             "second is false even though both numbers are real:")
+    for inner, outer, why in COHORT_NON_CONTAINMENT:
+        L.append(f"  - {inner} is NOT part of {outer} — {why}.")
+    L.append("")
+    L.append("correct_warnings is the ONE quantity that legitimately belongs to two sets: it is "
+             "exactly the overlap between the flagged jobs and the failures, i.e. the failures P3 "
+             "warned about. Every other count belongs to one set only, and quantities from "
+             "different sets can never be described as subsets of one another.")
+    return "\n".join(L)
+
+
 # ============================================================ 2. NUMERIC VALIDATION
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 
@@ -505,25 +633,85 @@ def _parse_json_object(raw: str):
         return None
     return o if isinstance(o, dict) and o else None
 
-def compose_markdown(obj: dict, lang: str) -> str:
-    """Dict -> markdown sections, expected keys first (in _SECTION_ORDER), the rest appended.
+# ---- the section set is CLOSED ------------------------------------------------------------------
+# Observed: the agent returned a key `executive_summary_part2`, and because composition title-cased
+# any unrecognised key into its own heading, the report grew a literal "## Executive summary part2"
+# and one section appeared as two. The section vocabulary is _SECTION_TITLES and nothing else.
+#
+# An off-vocabulary key is NOT dropped on sight -- it holds real prose the model wrote, and throwing
+# it away would lose report content. It is CANONICALISED where the name obviously points at a known
+# section (a `_part2` / `_2` / `_continued` suffix, or a known section as a prefix), and otherwise
+# merged into the section above it. Either way its heading disappears and an advisory records it.
+# This is deliberately not a hard-gate failure: the prose is fine, only the structure was wrong.
+_SECTION_SUFFIX = re.compile(r"[_\s-]*(?:part|section|cont(?:inued)?|pt)?[_\s-]*\d+$", re.I)
+
+def canonical_section(key: str):
+    """An off-vocabulary key -> the section it belongs to, or None if it names nothing known."""
+    k = str(key).strip().lower()
+    if k in _SECTION_TITLES:
+        return k
+    stripped = _SECTION_SUFFIX.sub("", k)          # executive_summary_part2 -> executive_summary
+    if stripped in _SECTION_TITLES:
+        return stripped
+    # longest known section that the key starts with, so `risk_assessment_details` -> risk_assessment
+    hits = [s for s in _SECTION_TITLES if k.startswith(s)]
+    return max(hits, key=len) if hits else None
+
+
+def compose_markdown(obj: dict, lang: str, off_vocabulary: list = None) -> str:
+    """Dict -> markdown sections, in _SECTION_ORDER, with a CLOSED heading vocabulary.
 
     The chart selection is skipped here on purpose. Under the current contract those entries are
     {chart_id, caption} pairs that become real rendered charts further down the pipeline; echoing
     them into the prose as a "Chart configs" section would print the plumbing next to the picture.
+
+    `off_vocabulary`, if given, is appended with (key, resolution) for every key that was not a
+    recognised section, so the caller can raise an advisory.
     """
     en = lang != "zh"
     skip = {k for k in obj if str(k).strip().lower() in _CHART_KEYS
             and isinstance(obj[k], (list, tuple))}
-    known = [k for k in _SECTION_ORDER if k in obj and k not in skip]
-    rest = [k for k in obj if k not in known and k not in skip]
-    out = []
-    for k in known + rest:
+
+    # collect bodies per canonical section, preserving first-seen order for anything unknown
+    sections, order, trailing = {}, [], []
+    for k in obj:
+        if k in skip:
+            continue
         body = _value_to_md(obj[k])
         if not body:
             continue
-        out.append(f"## {_pretty_key(k, en)}")
-        out.append(body)
+        canon = canonical_section(k)
+        if canon is None:
+            # nothing in the vocabulary matches: fold it into the section above rather than
+            # inventing a heading for it
+            if off_vocabulary is not None:
+                off_vocabulary.append((str(k), "merged into the preceding section"))
+            if order:
+                sections[order[-1]].append(body)
+            else:
+                trailing.append(body)
+            continue
+        if canon != str(k).strip().lower() and off_vocabulary is not None:
+            off_vocabulary.append((str(k), f"merged into '{canon}'"))
+        if canon not in sections:
+            sections[canon] = []
+            order.append(canon)
+        sections[canon].append(body)
+
+    # anything that arrived before any recognised section keeps the report's content
+    if trailing:
+        first = order[0] if order else "summary"
+        if first not in sections:
+            sections[first] = []
+            order.insert(0, first)
+        sections[first] = trailing + sections[first]
+
+    ordered = [s for s in _SECTION_ORDER if s in sections] + \
+              [s for s in order if s not in _SECTION_ORDER]
+    out = []
+    for s in ordered:
+        out.append(f"## {_pretty_key(s, en)}")
+        out.append("\n\n".join(sections[s]))
         out.append("")
     return "\n".join(out).strip()
 
@@ -536,7 +724,11 @@ _META_PAT = re.compile(
     r"|i\s+am\s+an?\s+|as\s+an\s+ai|as\s+requested,?\s+i"
     r"|download\s+(?:card|link|button|it)|you\s+can\s+download|attached\s+(?:file|report)|attachment"
     r"|\.json\s*(?:file|檔)|shift_report\.json"
-    r"|我(?:已|是)|已(?:為您)?(?:產生|生成|建立|完成)|檔案已|下載(?:卡|連結|按鈕)|附(?:件|上))",
+    # 身為 / 作為 ("in my capacity as ...") is the formal Chinese self-introduction and is more common
+    # in practice than 我是: measured, 3 of 8 generated demo reports opened with "身為 Data Analyst".
+    # Matching only 我是 let the same failure through under a different phrasing.
+    r"|我(?:已|是)|(?:身|作)為\s*(?:a\s+)?[A-Za-z一-鿿 ]{0,20}(?:Analyst|analyst|分析師|助理|AI)"
+    r"|已(?:為您)?(?:產生|生成|建立|完成)|檔案已|下載(?:卡|連結|按鈕)|附(?:件|上))",
     re.I)
 _CJK = re.compile(r"[一-鿿㐀-䶿]")
 
@@ -604,6 +796,7 @@ ADV_LANGUAGE = "language_mismatch"
 ADV_META     = "meta_commentary"
 ADV_SHORT    = "short_content"
 ADV_CHART_ID = "unknown_chart_id"       # raised by select_charts, one per dropped id
+ADV_SECTION  = "off_vocabulary_section" # the agent invented a heading outside the closed set
 
 def advisory_review(text: str, lang: str, length: str = "full", obj=None) -> list:
     """Non-blocking quality flags for a report that has already passed the hard gate."""
@@ -698,6 +891,210 @@ def caption_consistency_review(charts: list) -> list:
                                    f"against the chart."})
     return out
 
+
+# ---- false CONTAINMENT between two cohorts, in deterministic Python -------------------------------
+# WHAT THIS IS, AND WHY IT CAN EXIST AT ALL.
+#
+# caption_consistency_review() proved that the deterministic layer catches things the model does not,
+# and it works because it tests MEMBERSHIP against a set the code owns. The same trick applies to the
+# relational class, because the facts' own KEY NAMES carry the cohort (SET_OF_KEY above): if a
+# sentence says quantity A sits inside quantity B, and A's key and B's key belong to sets the cohort
+# model declares non-nesting, the sentence is false and Python can say so without any judgment.
+#
+# THREE CONDITIONS, ALL REQUIRED, and each one is there to buy precision:
+#   1. both numbers resolve UNAMBIGUOUSLY to a set. A value is only resolvable if every SET_OF_KEY
+#      key carrying it maps to the same single set AND the value appears nowhere else in the facts
+#      tree. correct_warnings is deliberately never resolvable -- it genuinely belongs to two sets.
+#   2. the pair appears in COHORT_NON_CONTAINMENT. Two numbers from sets that legitimately nest
+#      (flagged inside submitted) are never flagged.
+#   3. a containment cue sits BETWEEN them, in the direction the cue implies, close enough to be one
+#      claim, with no separating marker in the gap.
+#
+# Condition 3 is what stops the documented false positive. "Of the 331 flagged jobs, 108 were caught;
+# separately, 47 failures were never flagged" contains both numbers and a cue, and is TRUE -- the
+# semicolon and "separately" are separators, and "never flagged" is a negation, so the gap guard
+# drops it. An advisory that fires on correct text stops being read, which is the whole reason this
+# is narrow rather than clever.
+#
+# WHAT IT CANNOT DO, stated so nobody assumes otherwise. It needs two numbers. A sentence asserting
+# a false containment in words alone -- "most of the flagged jobs have already been caught" when 17%
+# have -- carries nothing to resolve and is invisible here. That class is the auditor's, not Python's.
+ADV_COHORT = "cohort_containment"
+
+# a number, optionally with thousands grouping, with its position preserved
+_NUM_POS = re.compile(r"\d{1,3}(?:[" + _GSEP_HARD + r"]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+_DEG_POS = re.compile(r"[" + _GSEP_HARD + r"]")
+_SENT_SPLIT = re.compile(r"(?<=[.!?;:])\s+|[\n\r]+|(?<=[。！？；：])")
+
+# FOUR PHRASINGS, because the cue does not reliably sit between the two numbers. Measured on the
+# fixtures: restricting to "inner CUE outer" caught 1 of 7 documented false claims, because English
+# puts the cue before the pair ("Of the 288 flagged, 151 failed") or after it, with the container
+# referred to by a pronoun ("...the 231 resolved failures sit within that cohort"), at least as often.
+#
+#   A  inner CUE outer      "47 of the 331 flagged jobs"
+#   B  outer CUE inner      "331 flagged jobs, including 47 missed failures"
+#   C  outer ... inner CUE <anaphor>   "flagged 331 jobs, and the 231 failures sit within that cohort"
+#   D  CUE outer ... inner  "Of the 288 jobs flagged, 151 have resolved as failures"
+#
+# C and D are the loose ones, so they use a NARROWER cue set: "of the" and "in the" are dropped
+# because outside an explicit between-position they have too many innocent readings ("in the last
+# 6 h"). C additionally requires an anaphor naming the container, and both require the pair to be
+# ADJACENT with nothing between them -- see the adjacency note in cohort_containment_review.
+_CUE_INNER_FIRST = (r"within", r"inside", r"among", r"amongst", r"out of", r"of the", r"of these",
+                    r"of those", r"part of", r"belong(?:s|ed)? to", r"included in", r"in the",
+                    r"sit(?:s)? in", r"fall(?:s)? (?:in|within)",
+                    r"之中", r"之內", r"當中", r"屬於", r"納入")
+_CUE_OUTER_FIRST = (r"including", r"includes", r"include", r"of which", r"comprising",
+                    r"made up of", r"consist(?:s|ing)? of", r"broken down into", r"其中", r"包括",
+                    r"包含", r"內含")
+# the subset strong enough to be trusted when it is NOT between the two numbers
+_CUE_STRONG = (r"within", r"inside", r"among", r"amongst", r"part of", r"belong(?:s|ed)? to",
+               r"included in", r"sit(?:s)? (?:in|within)", r"fall(?:s)? (?:in|within)",
+               r"of the", r"of these", r"of those", r"之中", r"之內", r"當中", r"屬於")
+_CUE_INNER_RE  = re.compile("|".join(_CUE_INNER_FIRST), re.I)
+_CUE_OUTER_RE  = re.compile("|".join(_CUE_OUTER_FIRST), re.I)
+# rule D: a strong cue introducing the container's number. The gap between cue and number allows
+# words but NO DIGITS -- live text writes "Within the flagged cohort of 288 jobs, 151 have resolved
+# as failures", where five words separate the cue from the number it introduces. Requiring adjacency
+# missed that; allowing digits in the gap would let the cue reach past an intervening quantity.
+_CUE_BEFORE_RE = re.compile(r"(?:" + "|".join(_CUE_STRONG) + r")[^\d]{0,40}$", re.I)
+# rule C: a strong cue that starts just after the contained number and points back at a named group.
+# The window is cut at the next digit before matching (see _after_window), so this can never reach
+# across a third number and pair two quantities that are not adjacent.
+_CUE_AFTER_RE  = re.compile(r"^.{0,45}?(?:" + "|".join(_CUE_STRONG) + r")\s+"
+                            r"(?:that|those|these|this|the|it|them|該|此|這些|那些)?\s*"
+                            r"(?:cohort|set|group|total|jobs|figure|count|them|those|these|it"
+                            r"|群|集合|批|總數)", re.I | re.S)
+
+def _after_window(sent: str, start: int, width: int = 90) -> str:
+    """The text just after a number, truncated at the next digit. Rule C looks for a cue pointing
+    BACK at the container, so anything past the next number belongs to a different claim."""
+    w = sent[start:start + width]
+    d = re.search(r"\d", w)
+    return w[:d.start()] if d else w
+
+# anything in the gap between the two numbers that says they are being contrasted, not nested
+_SEPARATOR_RE = re.compile(
+    r"[;；]|\bseparately\b|\bwhereas\b|\bwhile\b|\bbut\b|\bhowever\b|\bby contrast\b|\bin contrast\b"
+    r"|\bnever\b|\bnot\b|\bno\b|\boutside\b|\bdistinct\b|\bdifferent\b|\bunlike\b|\brather than\b"
+    r"|另外|另有|separately|而|但|卻|未|沒有|非|不同|以外|之外", re.I)
+
+CONTAINMENT_MAX_GAP = 140     # chars between the two numbers; beyond this it is not one claim
+
+def _blank(pattern, text: str) -> str:
+    """Replace every match with the SAME NUMBER of spaces, so string offsets survive scrubbing."""
+    return pattern.sub(lambda m: " " * (m.end() - m.start()), text)
+
+def _num_value(token: str) -> float:
+    return float(_DEG_POS.sub("", token))
+
+def resolve_sets(facts) -> dict:
+    """value -> the single set it unambiguously counts members of. Ambiguous values are absent.
+
+    A value earns an entry only if every SET_OF_KEY key holding it maps to the same one set, and the
+    value does not occur anywhere else in the facts tree. That second condition is what stops a node
+    count that happens to equal a job count from being read as a cohort quantity.
+    """
+    by_value, tracked_paths = {}, set(SET_OF_KEY)
+    for key, sets in SET_OF_KEY.items():
+        val = _fact_at(facts, key)
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            continue
+        by_value.setdefault(round(float(val), 2), set()).update(sets)
+
+    # every numeric value living anywhere OUTSIDE the tracked keys
+    elsewhere = set()
+    def walk(node, path):
+        if path in tracked_paths:
+            return
+        if isinstance(node, bool):
+            return
+        if isinstance(node, (int, float)):
+            elsewhere.add(round(float(node), 2)); return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v, path)
+        elif isinstance(node, str):
+            for m in _NUM.findall(node):
+                elsewhere.add(round(float(m), 2))
+    walk(facts, "")
+
+    return {v: next(iter(s)) for v, s in by_value.items()
+            if len(s) == 1 and v not in elsewhere}
+
+def _non_containment_pairs():
+    """{(inner_set, outer_set): (inner_key, outer_key, why)} for every declared non-containment."""
+    out = {}
+    for inner, outer, why in COHORT_NON_CONTAINMENT:
+        si, so = SET_OF_KEY.get(inner), SET_OF_KEY.get(outer)
+        if not si or not so or len(si) != 1 or len(so) != 1:
+            continue                       # a two-set key cannot anchor a containment claim
+        out[(si[0], so[0])] = (inner, outer, why)
+    return out
+
+def cohort_containment_review(text: str, facts: dict, extra_texts=None) -> list:
+    """Non-blocking flags where a sentence puts one cohort's quantity inside another's.
+
+    `extra_texts` is [(where, text)] for anything outside the narrative body that the agent also
+    wrote -- chart captions, in practice -- so this covers the same ground the auditor does.
+    """
+    resolved = resolve_sets(facts or {})
+    pairs = _non_containment_pairs()
+    if not resolved or not pairs:
+        return []
+
+    out, seen = [], set()
+    for where, body in [("narrative", text or "")] + list(extra_texts or []):
+        scrubbed = _blank(_SNAKE, _blank(_STRIP, body))       # P3 / p2_node_alert_score carry no claim
+        for sent in _SENT_SPLIT.split(scrubbed):
+            if not sent or not sent.strip():
+                continue
+            # EVERY number in the sentence, resolvable or not. The pair examined must be ADJACENT in
+            # this list: an unresolvable number sitting between two resolvable ones means they are
+            # not the two halves of one containment claim. Without this the check read
+            # "submitted 2245 jobs and 2029 ended, of which 1669 completed" as putting 1669 inside
+            # 2245 -- it paired the first and third numbers across an intervening one and fired on a
+            # correct sentence. Adjacency is the single cheapest precision win here.
+            nums = [(m.start(), m.end(), round(_num_value(m.group(0)), 2))
+                    for m in _NUM_POS.finditer(sent)]
+            for (s1, e1, v1), (s2, e2, v2) in zip(nums, nums[1:]):
+                set1, set2 = resolved.get(v1), resolved.get(v2)
+                if set1 is None or set2 is None:
+                    continue
+                gap = sent[e1:s2]
+                if len(gap) > CONTAINMENT_MAX_GAP or _SEPARATOR_RE.search(gap):
+                    continue
+                if _CUE_INNER_RE.search(gap):                   # A: inner CUE outer
+                    cand, rule = (set1, set2), "A"
+                elif _CUE_OUTER_RE.search(gap):                 # B: outer CUE inner
+                    cand, rule = (set2, set1), "B"
+                elif _CUE_AFTER_RE.match(_after_window(sent, e2)):   # C: outer .. inner CUE <anaphor>
+                    cand, rule = (set2, set1), "C"
+                elif _CUE_BEFORE_RE.search(sent[max(0, s1 - 30):s1]):   # D: CUE outer .. inner
+                    cand, rule = (set2, set1), "D"
+                else:
+                    continue
+                info = pairs.get(cand)
+                if info is None:
+                    continue
+                inner_key, outer_key, why = info
+                quote = sent.strip()[:220]
+                fingerprint = (where, quote, cand)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                out.append({"code": ADV_COHORT, "rule": rule,
+                            "message": f"In the {where}, \"{quote}\" describes "
+                                       f"{SET_LABEL[cand[0]]} as being inside "
+                                       f"{SET_LABEL[cand[1]]}. {inner_key} is not part of "
+                                       f"{outer_key} — {why}. Both numbers are real facts, so the "
+                                       f"numeric gate cannot see this."})
+    return out
+
+
 def compose_narration(raw: str, lang: str, length: str):
     """Raw agent reply -> (text, hard_reason, claims, obj).
 
@@ -716,6 +1113,7 @@ def compose_narration(raw: str, lang: str, length: str):
     """
     raw = (raw or "").strip()
     obj = _parse_json_object(raw)
+    off_vocab = []              # keys that were not recognised sections; drives ADV_SECTION
 
     if obj is not None:
         if length == "brief":
@@ -729,11 +1127,22 @@ def compose_narration(raw: str, lang: str, length: str):
                     if not (str(k).strip().lower() in _CHART_KEYS and isinstance(v, (list, tuple)))))
                 claims = _claim_texts(obj)
         else:
-            text, claims = compose_markdown(obj, lang), _claim_texts(obj)
+            text, claims = compose_markdown(obj, lang, off_vocab), _claim_texts(obj)
     else:
         text, claims = (_flatten_to_paragraph(raw) if length == "brief" else raw), None
 
-    return text, no_report_content(text, length), claims, obj
+    return text, no_report_content(text, length), claims, obj, off_vocab
+
+
+def section_advisories(off_vocab) -> list:
+    """One advisory naming every heading the agent invented outside the closed section set."""
+    if not off_vocab:
+        return []
+    named = ", ".join(f"'{k}' ({how})" for k, how in off_vocab[:6])
+    return [{"code": ADV_SECTION,
+             "message": f"Agent used {len(off_vocab)} heading"
+                        f"{'' if len(off_vocab) == 1 else 's'} outside the defined section set: "
+                        f"{named}. The prose was kept; the invented heading was not."}]
 
 def check_claims(claims, text, allowed, schema=None):
     """-> (unverified, field). `claims` None means validate `text` wholesale (plain-markdown reply).
@@ -993,6 +1402,13 @@ def _build_prompt(payload: dict, lang: str, length: str) -> str:
         "If you answer with a JSON object, every value must be a plain STRING of report prose (or "
         "a list of strings), with the single exception of the chart selection described below; "
         "no other nested objects, no file references.",
+        # the closed section vocabulary. Without this the agent split one section across
+        # `executive_summary` and `executive_summary_part2`, and the report grew a heading reading
+        # "Executive summary part2".
+        "The JSON keys are a CLOSED SET. Use only these, at most once each: "
+        + ", ".join(sorted(_SECTION_TITLES)) + ". "
+        "Never invent a key, never suffix one with part2/_2/_continued, and never split one "
+        "section across two keys -- if a section is long, keep it in a single string.",
     ]
     body = "\n".join(f"- {r}" for r in rules)
     # Charts belong to the full report panel; a brief report is one paragraph in a sidebar box with
@@ -1192,38 +1608,193 @@ _AUDIT_ADVISORY = {
     "skipped":      (None,                  "Auditor does not run for this report."),
 }
 
-def _audit_prompt(payload: dict, draft: str) -> str:
+# ---- the contract ---------------------------------------------------------------------------------
+# WHY THIS PROMPT LOOKS NOTHING LIKE THE ONE IT REPLACES.
+#
+# Measured, live, across four virtual timestamps: five narratives containing four confirmed false
+# claims, and the auditor returned is_valid=true on all five. The architecture was not the problem --
+# the contract was, in five specific ways, each of which is answered below:
+#
+#   1. It returned ONE BOOLEAN over ~600 words, and offered the `true` variant first. "Valid" was the
+#      cheap answer and nothing forced per-claim engagement.
+#      -> the output is now a LIST OF FINDINGS, each quoting the span it objects to, and the auditor
+#         must also enumerate the relational claims it checked. An empty findings list is still the
+#         pass condition, but it now has to be paid for with a list of what was examined.
+#
+#   2. It was asked to "verify that numbers and facts match" -- which is exactly what the
+#      deterministic hard gate already does, perfectly, BEFORE the auditor is ever called. It was
+#      being asked to re-derive a solved problem, and the class that actually gets through is a
+#      different one.
+#      -> the prompt now states outright that every number is already verified and that re-checking
+#         existence is not its job.
+#
+#   3. The facts arrived as a bare JSON dump. The identities that hold between them live in Python
+#      (see the cohort model above) and the auditor was never told they exist, so it had no basis on
+#      which to detect a violation.
+#      -> cohort_prose(facts) is injected alongside the JSON, generated from the SAME structures
+#         verify_cohort.py asserts, so the prompt and the tests cannot drift apart.
+#
+#   4. It contained no example of the target failure class, though documented instances existed.
+#      -> three worked examples of real false claims, each with the reason it is false, plus a
+#         CORRECT narrative as a counter-example so the auditor is not simply taught to object.
+#
+#   5. It audited the narrative only. Three of the four live failures were in the body, but one was
+#      in a caption, and captions were structurally invisible to it.
+#      -> captions are passed in and audited under the same rules.
+#
+# Everything about HOW it is called is unchanged: invoke_agent, the auditor's own cooldown namespace
+# and retry profile, the 60s timeout (a 15s one answered 0/5), mode=="llm" and length=="full" only,
+# inside REPORT_TIME_BUDGET, seven distinct advisory codes, fail-open throughout.
+_AUDIT_EXAMPLES = """\
+WORKED EXAMPLES. These are real false claims that this auditor previously passed. Each one uses only
+real numbers, so the numeric checker had nothing to say about any of them.
+
+  FALSE: "P3 flagged 331 jobs at submission, and the 145 resolved failures sit within that cohort."
+    Why: failures_resolved counts caught AND missed failures. The missed ones were never flagged, so
+    the 145 cannot be inside the 331. Finding severity: high.
+
+  FALSE: "the 460 flagged jobs, including the 34 missed failures"
+    Why: same error in a caption. A missed failure is one that was NOT flagged; it cannot be part of
+    the flagged set. Finding severity: high.
+
+  FALSE: "Most of the flagged jobs have already been caught."  (facts: 17% caught, 71% still pending)
+    Why: contains NO number, so nothing can be checked numerically -- and it still contradicts the
+    proportions. "Most" asserts a majority; the majority are pending, not caught. Finding severity:
+    high. A qualitative word is a claim about the data and you must check it against the numbers.
+
+  FALSE: "four TIMEOUT-predicted jobs appear on the watch list"  (facts: six such jobs)
+    Why: a quantity written as a WORD is still a quantity. Spelled-out numbers are not exempt from
+    matching the facts. Finding severity: medium.
+
+  CORRECT, DO NOT FLAG: "P3 flagged 331 jobs at submission; 108 have been confirmed as real
+  failures, 73 were false alarms and 150 have not finished yet. Separately, 37 failures were never
+  flagged at all."
+    Why it is fine: 108 + 73 + 150 = 331 is the flagged partition, and the 37 misses are stated as a
+    SEPARATE quantity rather than as a slice of the 331. Reporting misses honestly alongside the
+    flagged cohort is correct and required. Flagging this would be a false positive.
+"""
+
+def _audit_prompt(payload: dict, draft: str, identities: str = "", captions=None) -> str:
+    cap_block = ""
+    if captions:
+        lines = "\n".join(f'  - chart "{cid}": {txt}' for cid, txt in captions if str(txt).strip())
+        if lines:
+            cap_block = ("CHART CAPTIONS THE SAME WRITER PRODUCED (audit these under the same rules "
+                         "as the narrative -- a caption is a claim):\n" + lines + "\n\n")
     return (
-        "You are a Data Auditor verifying an operational report against raw facts.\n\n"
+        "You are a Data Auditor reviewing an operational shift report. You are the SECOND check, "
+        "not the first.\n\n"
+
+        "WHAT HAS ALREADY BEEN DONE FOR YOU, so you do not waste effort repeating it:\n"
+        "Deterministic code has already verified that EVERY number in this report traces to a value "
+        "in the FACTS DATA below. There are no invented figures. Checking whether a number exists in "
+        "the facts is NOT your job and finding that it does is not a result.\n\n"
+
+        "WHAT IS ACTUALLY YOUR JOB -- the RELATIONSHIPS between numbers, which no numeric check can "
+        "see because both numbers are real:\n"
+        "  (a) CONTAINMENT: a quantity described as being inside, among, part of or a subset of a "
+        "group it does not belong to.\n"
+        "  (b) DENOMINATOR: a rate, share, proportion or catch rate computed or described over the "
+        "wrong base set.\n"
+        "  (c) CAUSATION: a cause-and-effect or explanatory claim the facts do not support. The "
+        "facts are counts and measurements; they rarely license 'because'.\n"
+        "  (d) QUALITATIVE CONTRADICTION: a word like most, few, nearly all, the majority, largely, "
+        "rarely, dominated by -- with NO number attached -- that contradicts the underlying "
+        "proportions. These are invisible to every numeric check and you are the only thing that can "
+        "catch them.\n"
+        "  (e) MATERIAL OMISSION: bad news that is present in the facts and absent from the report -- "
+        "missed failures, a low catch rate, a node onset. Only flag an omission when the fact is in "
+        "the FACTS DATA below.\n\n"
+
+        "HOW THE COUNTS RELATE TO EACH OTHER. Read this before judging any containment claim:\n"
+        f"{identities}\n\n"
+
+        f"{_AUDIT_EXAMPLES}\n"
+
         f"FACTS DATA:\n{json.dumps(payload, ensure_ascii=False)}\n\n"
-        f"DRAFT NARRATIVE TO AUDIT:\n{draft}\n\n"
-        "Audit the draft narrative against the facts. Verify that numbers, facts, and conclusions "
-        "match. Judge ONLY against the FACTS DATA above -- it is the same data the writer was "
-        "given, so anything absent from it is out of scope and must not be flagged as missing.\n"
-        "Return ONLY a JSON object with this exact shape:\n"
-        '{"is_valid": true, "reason": null} OR '
-        '{"is_valid": false, "reason": "Short explanation of discrepancy"}'
+
+        f"{cap_block}"
+
+        f"REPORT NARRATIVE TO AUDIT:\n{draft}\n\n"
+
+        "Judge ONLY against the FACTS DATA above. It is the same data the writer was given, so a "
+        "fact that is absent from it was absent for the writer too and must never be flagged as "
+        "missing or unsupported.\n\n"
+
+        "Return ONLY a JSON object, with exactly these two keys:\n"
+        '{\n'
+        '  "relational_claims_checked": ["a short description of each relationship you examined, '
+        'whether or not it was wrong -- at least three entries"],\n'
+        '  "findings": [\n'
+        '    {"quote": "the exact span of text you object to, copied verbatim",\n'
+        '     "contradicts": "the fact key or identity it violates",\n'
+        '     "why": "one sentence on why it is false",\n'
+        '     "severity": "high | medium | low",\n'
+        '     "location": "narrative | caption"}\n'
+        '  ]\n'
+        '}\n'
+        "An EMPTY findings list is the correct answer for a sound report, and sound reports are "
+        "common -- do not manufacture a finding to look diligent. But an empty list is only credible "
+        "alongside a populated relational_claims_checked list showing what you actually examined."
     )
 
-def audit_llm(facts: dict, draft_narrative: str, lang: str = "en", budget_left=None) -> dict:
+
+MAX_AUDIT_FINDINGS = 8       # what is carried into the advisories; the rest are counted, not listed
+
+def _coerce_findings(parsed: dict) -> list:
+    """The auditor's findings list, normalised. Tolerates a partly-malformed entry rather than
+    discarding a whole audit for one bad field."""
+    raw = parsed.get("findings")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out = []
+    for f in raw:
+        if isinstance(f, str):
+            f = {"why": f}
+        if not isinstance(f, dict):
+            continue
+        sev = str(f.get("severity") or "medium").strip().lower()
+        if sev not in ("high", "medium", "low"):
+            sev = "medium"
+        loc = str(f.get("location") or "narrative").strip().lower()
+        entry = {"quote": str(f.get("quote") or "").strip()[:300],
+                 "contradicts": str(f.get("contradicts") or "").strip()[:200],
+                 "why": str(f.get("why") or f.get("reason") or "").strip()[:400],
+                 "severity": sev,
+                 "location": ("caption" if "caption" in loc else "narrative")}
+        if entry["quote"] or entry["why"]:
+            out.append(entry)
+    return out
+
+
+def audit_llm(facts: dict, draft_narrative: str, lang: str = "en", budget_left=None,
+              captions=None) -> dict:
     """Second-opinion review of a narrative. NEVER raises, NEVER blocks. -> audit state dict:
 
-        {"ran": bool, "state": str, "is_valid": bool|None, "reason": str|None,
-         "latency_s": float, "advisory_code": str|None}
+        {"ran": bool, "state": str, "is_valid": bool|None, "reason": str|None, "findings": [...],
+         "checked": [...], "latency_s": float, "advisory_code": str|None, "message": str}
 
     `state` is one of the keys of _AUDIT_ADVISORY. `ran` is True only when the auditor actually
     answered -- which is the point: previously every failure path returned is_valid=True, so a
     100%-dead auditor was indistinguishable from one that had read the report and approved it.
+
+    `is_valid` is retained and means exactly "the findings list came back empty", so every existing
+    consumer keeps working while the informative payload is `findings`.
+
+    `captions` is [(chart_id, caption)] for the AGENT'S OWN captions. Python-written captions are
+    excluded by the caller: they are built from the chart and there is nothing to audit.
     """
     t0 = time.time()
 
-    def out(state, is_valid=None, reason=None):
+    def out(state, is_valid=None, reason=None, findings=None, checked=None):
         code, sentence = _AUDIT_ADVISORY.get(state, (ADV_AUDIT_FAILED, "Auditor state unknown."))
         return {"ran": state in ("ok", "flagged"), "state": state, "is_valid": is_valid,
-                "reason": reason, "latency_s": round(time.time() - t0, 2),
+                "reason": reason, "findings": list(findings or []), "checked": list(checked or []),
+                "latency_s": round(time.time() - t0, 2),
                 "advisory_code": code, "message": sentence}
 
-    prompt = _audit_prompt(trim_facts_for_prompt(facts, lang), draft_narrative)
+    prompt = _audit_prompt(trim_facts_for_prompt(facts, lang), draft_narrative,
+                           identities=cohort_prose(facts or {}), captions=captions)
     text, reason, err = invoke_agent(AGENT_AUDITOR, "LAPLACE_AUDITOR_INVOKE_URL",
                                      "LAPLACE_AUDITOR_BEARER_SECRET", prompt,
                                      budget_left=budget_left)
@@ -1233,15 +1804,39 @@ def audit_llm(facts: dict, draft_narrative: str, lang: str = "en", budget_left=N
         return out(state, reason=reason)
 
     parsed = _parse_json_object(text)
-    if not (isinstance(parsed, dict) and "is_valid" in parsed):
-        return out("unparseable", reason=f"auditor reply was not the expected verdict: {text[:120]}")
+    # Both shapes are accepted. The findings contract is what is asked for; the older single-boolean
+    # verdict is still understood rather than being thrown away as unparseable, because a reply that
+    # says something is worth more than one discarded for using last month's schema.
+    if isinstance(parsed, dict) and "findings" in parsed:
+        findings = _coerce_findings(parsed)
+        checked = [str(x)[:200] for x in (parsed.get("relational_claims_checked") or [])
+                   if str(x).strip()][:12]
+        if findings:
+            top = findings[0]
+            reason = f"{top['why'] or top['quote']}" + (f" (contradicts {top['contradicts']})"
+                                                        if top["contradicts"] else "")
+            return out("flagged", is_valid=False, reason=reason, findings=findings, checked=checked)
+        return out("ok", is_valid=True, findings=[], checked=checked)
 
-    valid = bool(parsed.get("is_valid"))
-    return out("ok" if valid else "flagged", is_valid=valid, reason=parsed.get("reason"))
+    if isinstance(parsed, dict) and "is_valid" in parsed:
+        valid = bool(parsed.get("is_valid"))
+        legacy = ([] if valid else [{"quote": "", "contradicts": "", "severity": "medium",
+                                     "location": "narrative",
+                                     "why": str(parsed.get("reason") or "discrepancy detected")}])
+        return out("ok" if valid else "flagged", is_valid=valid,
+                   reason=parsed.get("reason"), findings=legacy)
+
+    return out("unparseable", reason=f"auditor reply was not the expected verdict: {text[:120]}")
 
 
 def audit_advisories(audit: dict) -> list:
-    """The advisory list for an audit outcome. [] when the auditor ran and agreed."""
+    """The advisory list for an audit outcome. [] when the auditor ran and found nothing.
+
+    A flagged audit now produces ONE advisory PER FINDING, each carrying the span the auditor
+    objected to and the fact it says that span contradicts. A single collapsed sentence was fine for
+    a boolean verdict; it is the wrong shape for a list, because an operator's next action is to look
+    at the quoted text.
+    """
     if not isinstance(audit, dict):
         return []
     code = audit.get("advisory_code")
@@ -1249,11 +1844,31 @@ def audit_advisories(audit: dict) -> list:
         return []
     msg = audit.get("message") or "Auditor did not review this report."
     detail = audit.get("reason")
-    if code == ADV_AUDIT_FLAG:
-        msg = f"Auditor Agent flagged narrative: {detail or 'discrepancy detected'}"
-    elif detail:
-        msg = f"{msg} ({detail})"
-    return [{"code": code, "message": msg}]
+    if code != ADV_AUDIT_FLAG:
+        return [{"code": code, "message": f"{msg} ({detail})" if detail else msg}]
+
+    findings = audit.get("findings") or []
+    if not findings:                                   # flagged with no itemised finding
+        return [{"code": code,
+                 "message": f"Auditor Agent flagged narrative: {detail or 'discrepancy detected'}"}]
+
+    out = []
+    for f in findings[:MAX_AUDIT_FINDINGS]:
+        where = f.get("location") or "narrative"
+        quote = (f.get("quote") or "").strip()
+        bits = [f"Auditor Agent flagged the {where} [{f.get('severity', 'medium')}]"]
+        if quote:
+            bits.append(f'— "{quote}"')
+        if f.get("why"):
+            bits.append(f"— {f['why']}")
+        if f.get("contradicts"):
+            bits.append(f"(contradicts {f['contradicts']})")
+        out.append({"code": code, "message": " ".join(bits)})
+    extra = len(findings) - len(out)
+    if extra > 0:
+        out.append({"code": code, "message": f"Auditor Agent raised {extra} further finding"
+                                             f"{'' if extra == 1 else 's'} not listed here."})
+    return out
 
 # ============================================================ 4. TEMPLATE FALLBACK (deterministic)
 def _plural(n, en): return "" if (en and n == 1) else ("" if not en else "s")
@@ -1534,12 +2149,29 @@ PREWARM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", 
 def _key_str(key) -> str:
     return "|".join(str(x) for x in key)
 
+# The prewarm file is read on every cache MISS, and the brief report is polled every ~12s with a key
+# that changes constantly, so that is a hot path. Committing prepared demo reports makes the file
+# permanently present and roughly a megabyte, which would mean re-parsing a megabyte of JSON several
+# times a minute. It is therefore memoised on (mtime, size) -- a cheap stat instead of a parse, and
+# still picks up a file rewritten by prewarm_reports.py in another process.
+_DISK_CACHE = {"sig": None, "data": {}}
+
 def _disk_load() -> dict:
     try:
-        with open(PREWARM_PATH, encoding="utf-8") as fh:
-            return json.load(fh)
+        st = os.stat(PREWARM_PATH)
+        sig = (st.st_mtime_ns, st.st_size)
     except Exception:
+        _DISK_CACHE["sig"], _DISK_CACHE["data"] = None, {}
         return {}
+    if sig == _DISK_CACHE["sig"]:
+        return _DISK_CACHE["data"]
+    try:
+        with open(PREWARM_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+    _DISK_CACHE["sig"], _DISK_CACHE["data"] = sig, data
+    return data
 
 def _disk_save(d: dict) -> bool:
     try:
@@ -1548,6 +2180,7 @@ def _disk_save(d: dict) -> bool:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(d, fh, ensure_ascii=False)
         os.replace(tmp, PREWARM_PATH)
+        _DISK_CACHE["sig"] = None      # force the next read to re-parse what we just wrote
         return True
     except Exception:
         return False
@@ -1597,17 +2230,18 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
     unver, bad_field, advisories, draft = [], None, [], None
     selection, chart_adv = [], []
     audit = {"ran": False, "state": "skipped", "is_valid": None, "reason": None,
-             "latency_s": 0.0, "advisory_code": None,
+             "findings": [], "checked": [], "latency_s": 0.0, "advisory_code": None,
              "message": _AUDIT_ADVISORY["skipped"][1]}
 
     if raw is not None:
         # shape the reply (JSON contract -> markdown, or prose as-is); `llm` is the composed text
         # even when the hard gate is about to reject it, so the draft can be preserved.
-        llm, content_reason, claims, obj = compose_narration(raw, lang, length)
+        llm, content_reason, claims, obj, off_vocab = compose_narration(raw, lang, length)
         # the agent's chart picks: enum-validated, unknown ids dropped with an advisory each
         selection, chart_adv = select_charts(obj)
         # ADVISORY LAYER: never blocks, never feeds back into `mode`.
-        advisories = advisory_review(llm, lang, length, obj) + chart_adv
+        advisories = (advisory_review(llm, lang, length, obj) + chart_adv
+                      + section_advisories(off_vocab))
     else:
         llm, content_reason, claims, obj = None, None, None, None
 
@@ -1638,10 +2272,25 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
     #     every 12 seconds for a paragraph in a sidebar;
     #   * inside a total time budget -- if narration already consumed the request, the audit is
     #     skipped and says so rather than making the user wait longer for an advisory note.
+    #
+    # Its SCOPE now includes the agent's chart captions. Three of the four confirmed live failures
+    # were in the body and one was in a caption, so auditing the body alone could never have caught
+    # all of them. The captions come from `selection` -- the agent's own text, already parsed at this
+    # point -- rather than from the rendered charts, which do not exist until further down. Only
+    # agent-written captions are sent: a Python default caption is built from the chart and there is
+    # nothing in it to audit.
+    agent_captions = [(cid.value, cap) for cid, cap in (selection or []) if str(cap or "").strip()]
     if mode == "llm" and length == "full" and audit_enabled():
         left = REPORT_TIME_BUDGET - (time.time() - started)
-        audit = audit_llm(facts, text, lang=lang, budget_left=left)
+        audit = audit_llm(facts, text, lang=lang, budget_left=left, captions=agent_captions)
         advisories = list(advisories) + audit_advisories(audit)
+
+    # DETERMINISTIC cohort check, at the same seam and independent of the auditor. It runs for the
+    # LLM path only -- the template's own sentences are generated from these facts and cannot state a
+    # false containment -- and it covers the body and the captions together.
+    if mode == "llm":
+        advisories = list(advisories) + cohort_containment_review(
+            text, facts, [(f"caption on '{cid}'", cap) for cid, cap in agent_captions])
 
     # ---- charts: computed here, from the facts and the store, for EVERY mode ----
     charts, charts_unavailable = [], []

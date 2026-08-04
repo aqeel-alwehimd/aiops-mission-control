@@ -1,0 +1,14 @@
+{
+  "threshold_catch": 0.6,
+  "threshold_fp": 0.25,
+  "runs": 3,
+  "deterministic": {
+    "catch": 4,
+    "n_false": 7,
+    "fp": 0,
+    "n_clean": 6,
+    "template_corpus_n": 160,
+    "template_corpus_fp": 0
+  },
+  "llm": null
+}

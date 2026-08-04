@@ -20,3 +20,6 @@ __pycache__/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 _duckdb_spill/
+
+# transient prewarm run log
+data/_demo_run.log

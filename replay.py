@@ -84,6 +84,30 @@ class VirtualClock:
             self._ensure_manual(); self._sync()
             self._manual["vt"] = max(self.win_start, min(self.win_end, float(virtual_ts)))
 
+    def goto(self, virtual_ts: float):
+        """Land on an exact virtual moment AND HOLD there. The one control a demo needs.
+
+        WHY THIS EXISTS, in arithmetic. The report cache is keyed on the virtual time bucketed to
+        CACHE_BUCKET (900 virtual seconds). At the default 3600x, the live clock crosses the whole
+        72-hour replay window in 72 real seconds, so each 15-minute bucket is the current one for
+        0.25 REAL SECONDS. A report prepared for a chosen moment is therefore reachable roughly
+        once every 72 seconds, for a quarter of a second -- which is not something anyone can
+        demonstrate.
+
+        `jump` alone does not fix it: _ensure_manual() seeds the override with paused=False, so a
+        jump starts a manual clock that immediately runs at 3600x and leaves the bucket in the same
+        quarter second. Pausing separately is a second HTTP call with the clock running in between.
+        This does both inside one acquisition of the lock, so the landing is exact.
+
+        Nothing else changes. play / pause / step / speed / jump / jump_frac keep their behaviour,
+        and reset() still drops the override and returns to the shared wall-clock position, so
+        normal operation is untouched and a demo pin cannot outlive a restart.
+        """
+        with self._lock:
+            self._ensure_manual(); self._sync()
+            self._manual["vt"] = max(self.win_start, min(self.win_end, float(virtual_ts)))
+            self._manual["paused"] = True
+
     def jump_frac(self, frac: float):
         """Jump to a fraction (0..1) through the replay window."""
         f = max(0.0, min(1.0, float(frac)))

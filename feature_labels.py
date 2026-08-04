@@ -31,101 +31,109 @@ import os
 import re
 
 # ============================================================ base sensors (the thing measured)
-# (en, zh). Units belong here, not in the statistic, because a slope or a z-score of a quantity
-# does not carry the quantity's unit.
+# (en, zh, unit). The unit lives here rather than in the label text because whether it SURVIVES
+# depends on the statistic: a 30-minute mean of watts is still watts, a slope of watts is watts per
+# unit time, and a z-score is dimensionless. See UNIT_PRESERVING below.
 BASE_SENSORS = {
     # --- node / CPU power ---
-    "totP":        ("Total node power",        "節點總功耗"),
-    "totPMX":      ("Total node power, peak",  "節點總功耗 (峰值)"),
-    "totPSD":      ("Total node power, spread", "節點總功耗 (離散度)"),
-    "p0P":         ("CPU0 power",              "CPU0 功耗"),
-    "p1P":         ("CPU1 power",              "CPU1 功耗"),
-    "p0_ioP":      ("CPU0 I/O power",          "CPU0 I/O 功耗"),
-    "p1_ioP":      ("CPU1 I/O power",          "CPU1 I/O 功耗"),
-    "p0_memP":     ("CPU0 memory power",       "CPU0 記憶體功耗"),
-    "p1_memP":     ("CPU1 memory power",       "CPU1 記憶體功耗"),
+    "totP":        ("Total node power", "節點總功耗", "W"),
+    "totPMX":      ("Total node power, peak", "節點總功耗 (峰值)", "W"),
+    "totPSD":      ("Total node power, spread", "節點總功耗 (離散度)", "W"),
+    "p0P":         ("CPU0 power", "CPU0 功耗", "W"),
+    "p1P":         ("CPU1 power", "CPU1 功耗", "W"),
+    "p0_ioP":      ("CPU0 I/O power", "CPU0 I/O 功耗", "W"),
+    "p1_ioP":      ("CPU1 I/O power", "CPU1 I/O 功耗", "W"),
+    "p0_memP":     ("CPU0 memory power", "CPU0 記憶體功耗", "W"),
+    "p1_memP":     ("CPU1 memory power", "CPU1 記憶體功耗", "W"),
     # --- PSU ---
-    "ps0_inputP":  ("PSU-0 input power",       "PSU-0 輸入功率"),
-    "ps1_inputP":  ("PSU-1 input power",       "PSU-1 輸入功率"),
+    "ps0_inputP":  ("PSU-0 input power", "PSU-0 輸入功率", "W"),
+    "ps1_inputP":  ("PSU-1 input power", "PSU-1 輸入功率", "W"),
     # --- temperatures ---
-    "g0_cT":       ("GPU0 core temp",          "GPU0 核心溫度"),
-    "g1_cT":       ("GPU1 core temp",          "GPU1 核心溫度"),
-    "g3_cT":       ("GPU3 core temp",          "GPU3 核心溫度"),
-    "g4_cT":       ("GPU4 core temp",          "GPU4 核心溫度"),
-    "g0_cTMX":     ("GPU0 core temp, peak",    "GPU0 核心溫度 (峰值)"),
-    "g0_cTSD":     ("GPU0 core temp, spread",  "GPU0 核心溫度 (離散度)"),
-    "g0_memT":     ("GPU0 memory temp",        "GPU0 記憶體溫度"),
-    "g1_memT":     ("GPU1 memory temp",        "GPU1 記憶體溫度"),
-    "p0_vddT":     ("CPU0 Vdd temp",           "CPU0 Vdd 溫度"),
-    "p1_vddT":     ("CPU1 Vdd temp",           "CPU1 Vdd 溫度"),
-    "dimm0T":      ("DIMM 0 temp",             "DIMM 0 溫度"),
-    "dimm4T":      ("DIMM 4 temp",             "DIMM 4 溫度"),
-    "dimm8T":      ("DIMM 8 temp",             "DIMM 8 溫度"),
-    "dimm12T":     ("DIMM 12 temp",            "DIMM 12 溫度"),
-    "pcie":        ("PCIe temp",               "PCIe 溫度"),
-    "amb":         ("Ambient temp",            "環境溫度"),
+    "g0_cT":       ("GPU0 core temp", "GPU0 核心溫度", "°C"),
+    "g1_cT":       ("GPU1 core temp", "GPU1 核心溫度", "°C"),
+    "g3_cT":       ("GPU3 core temp", "GPU3 核心溫度", "°C"),
+    "g4_cT":       ("GPU4 core temp", "GPU4 核心溫度", "°C"),
+    "g0_cTMX":     ("GPU0 core temp, peak", "GPU0 核心溫度 (峰值)", "°C"),
+    "g0_cTSD":     ("GPU0 core temp, spread", "GPU0 核心溫度 (離散度)", "°C"),
+    "g0_memT":     ("GPU0 memory temp", "GPU0 記憶體溫度", "°C"),
+    "g1_memT":     ("GPU1 memory temp", "GPU1 記憶體溫度", "°C"),
+    "p0_vddT":     ("CPU0 Vdd temp", "CPU0 Vdd 溫度", "°C"),
+    "p1_vddT":     ("CPU1 Vdd temp", "CPU1 Vdd 溫度", "°C"),
+    "dimm0T":      ("DIMM 0 temp", "DIMM 0 溫度", "°C"),
+    "dimm4T":      ("DIMM 4 temp", "DIMM 4 溫度", "°C"),
+    "dimm8T":      ("DIMM 8 temp", "DIMM 8 溫度", "°C"),
+    "dimm12T":     ("DIMM 12 temp", "DIMM 12 溫度", "°C"),
+    "pcie":        ("PCIe temp", "PCIe 溫度", "°C"),
+    "amb":         ("Ambient temp", "環境溫度", "°C"),
     # --- fans ---
-    "fan0_0":      ("Fan 0 speed",             "風扇 0 轉速"),
-    "fan1_0":      ("Fan 1 speed",             "風扇 1 轉速"),
-    "fan2_0":      ("Fan 2 speed",             "風扇 2 轉速"),
-    "fan3_0":      ("Fan 3 speed",             "風扇 3 轉速"),
-    "fan_diskP":   ("Disk-fan power",          "磁碟風扇功耗"),
+    "fan0_0":      ("Fan 0 speed", "風扇 0 轉速", "rpm"),
+    "fan1_0":      ("Fan 1 speed", "風扇 1 轉速", "rpm"),
+    "fan2_0":      ("Fan 2 speed", "風扇 2 轉速", "rpm"),
+    "fan3_0":      ("Fan 3 speed", "風扇 3 轉速", "rpm"),
+    "fan_diskP":   ("Disk-fan power", "磁碟風扇功耗", "W"),
     # --- fleet-level scalars ---
-    "anom":        ("Fleet anomaly count",     "全機群異常數"),
-    "anom_frac":   ("Fleet anomaly fraction",  "全機群異常比例"),
+    "anom":        ("Fleet anomaly count", "全機群異常數", ""),
+    "anom_frac":   ("Fleet anomaly fraction", "全機群異常比例", ""),
 }
 # the "non-zero" variants used by the fleet aggregates: same sensor, restricted to reporting nodes
 for _b in ("totP", "g0_cT", "p0_vddT", "amb", "fan0_0", "p0P"):
-    BASE_SENSORS["nz_" + _b] = (BASE_SENSORS[_b][0], BASE_SENSORS[_b][1])
+    BASE_SENSORS["nz_" + _b] = BASE_SENSORS[_b]
 
 # ============================================================ statistics (what is done to it)
 # "{}" is filled with the base sensor's name.
 STATISTICS = {
-    "cur_":         ("{}",                          "{}"),
+    "cur_":         ("{}", "{}", ""),
     # rolling moments
-    "m30m_":        ("{}, 30-min mean",             "{} 30 分鐘均值"),
-    "m2h_":         ("{}, 2-h mean",                "{} 2 小時均值"),
-    "m6h_":         ("{}, 6-h mean",                "{} 6 小時均值"),
-    "s30m_":        ("{}, 30-min variability",      "{} 30 分鐘變異度"),
-    "s2h_":         ("{}, 2-h variability",         "{} 2 小時變異度"),
-    "s6h_":         ("{}, 6-h variability",         "{} 6 小時變異度"),
+    "m30m_":        ("{}, 30-min mean", "{} 30 分鐘均值", ""),
+    "m2h_":         ("{}, 2-h mean", "{} 2 小時均值", ""),
+    "m6h_":         ("{}, 6-h mean", "{} 6 小時均值", ""),
+    "s30m_":        ("{}, 30-min variability", "{} 30 分鐘變異度", ""),
+    "s2h_":         ("{}, 2-h variability", "{} 2 小時變異度", ""),
+    "s6h_":         ("{}, 6-h variability", "{} 6 小時變異度", ""),
     # trend
-    "slope30m_":    ("{}, 30-min trend",            "{} 30 分鐘趨勢"),
-    "slope2h_":     ("{}, 2-h trend",               "{} 2 小時趨勢"),
-    "slope6h_":     ("{}, 6-h trend",               "{} 6 小時趨勢"),
-    "accel_":       ("{}, trend acceleration",      "{} 趨勢加速度"),
-    "ewmaf_":       ("{}, fast moving average",     "{} 快速移動平均"),
-    "ewmas_":       ("{}, slow moving average",     "{} 慢速移動平均"),
+    "slope30m_":    ("{}, 30-min trend", "{} 30 分鐘趨勢", ""),
+    "slope2h_":     ("{}, 2-h trend", "{} 2 小時趨勢", ""),
+    "slope6h_":     ("{}, 6-h trend", "{} 6 小時趨勢", ""),
+    "accel_":       ("{}, trend acceleration", "{} 趨勢加速度", ""),
+    "ewmaf_":       ("{}, fast moving average", "{} 快速移動平均", ""),
+    "ewmas_":       ("{}, slow moving average", "{} 慢速移動平均", ""),
     # range
-    "lo30m_":       ("{}, 30-min low",              "{} 30 分鐘最低"),
-    "hi30m_":       ("{}, 30-min high",             "{} 30 分鐘最高"),
-    "rng30m_":      ("{}, 30-min range",            "{} 30 分鐘全距"),
-    "lo2h_":        ("{}, 2-h low",                 "{} 2 小時最低"),
-    "hi2h_":        ("{}, 2-h high",                "{} 2 小時最高"),
-    "rng2h_":       ("{}, 2-h range",               "{} 2 小時全距"),
-    "lo6h_":        ("{}, 6-h low",                 "{} 6 小時最低"),
-    "hi6h_":        ("{}, 6-h high",                "{} 6 小時最高"),
-    "rng6h_":       ("{}, 6-h range",               "{} 6 小時全距"),
+    "lo30m_":       ("{}, 30-min low", "{} 30 分鐘最低", ""),
+    "hi30m_":       ("{}, 30-min high", "{} 30 分鐘最高", ""),
+    "rng30m_":      ("{}, 30-min range", "{} 30 分鐘全距", ""),
+    "lo2h_":        ("{}, 2-h low", "{} 2 小時最低", ""),
+    "hi2h_":        ("{}, 2-h high", "{} 2 小時最高", ""),
+    "rng2h_":       ("{}, 2-h range", "{} 2 小時全距", ""),
+    "lo6h_":        ("{}, 6-h low", "{} 6 小時最低", ""),
+    "hi6h_":        ("{}, 6-h high", "{} 6 小時最高", ""),
+    "rng6h_":       ("{}, 6-h range", "{} 6 小時全距", ""),
     # baselines
-    "z7d_":         ("{}, z-score vs 7-day",        "{} z 分數 (對 7 日基線)"),
-    "z30d_":        ("{}, z-score vs 30-day",       "{} z 分數 (對 30 日基線)"),
+    "z7d_":         ("{}, z-score vs 7-day", "{} z 分數 (對 7 日基線)", ""),
+    "z30d_":        ("{}, z-score vs 30-day", "{} z 分數 (對 30 日基線)", ""),
     # spatial context
-    "nb_mean_nz_":  ("{}, rack-neighbour mean",     "{} 同機櫃鄰居平均"),
-    "nb_max_nz_":   ("{}, rack-neighbour max",      "{} 同機櫃鄰居最大"),
-    "fleetmax_nz_": ("{}, fleet max",               "{} 全機群最大"),
-    "fleet_":       ("{}",                          "{}"),
-    "dev_med_nz_":  ("{}, deviation from fleet median", "{} 相對全機群中位數偏差"),
+    "nb_mean_nz_":  ("{}, rack-neighbour mean", "{} 同機櫃鄰居平均", ""),
+    "nb_max_nz_":   ("{}, rack-neighbour max", "{} 同機櫃鄰居最大", ""),
+    "fleetmax_nz_": ("{}, fleet max", "{} 全機群最大", ""),
+    # `fleet_nz_totP` is the FLEET MEAN of a sensor, not the node's own reading. Labelling it with
+    # the bare sensor name (the identity template this used to have) made it collide word-for-word
+    # with `cur_totP`, which is the node's own value -- two different quantities, one label.
+    "fleet_":       ("{}, fleet mean", "{} 全機群平均", ""),
+    "dev_med_nz_":  ("{}, deviation from fleet median", "{} 相對全機群中位數偏差", ""),
 }
 _LAG = re.compile(r"^lag(\d+)_(.+)$")
 
 # ============================================================ standalone features (no sensor base)
 STANDALONE = {
-    "rk_anom_o":  ("Rack anomaly rank",              "機櫃異常排名"),
-    "rk_pre_o":   ("Rack pre-anomaly rank",          "機櫃前兆排名"),
-    "rk_n":       ("Nodes reporting in rack",        "機櫃回報節點數"),
-    "hour":       ("Hour of day (UTC)",              "當日時段 (UTC)"),
-    "dow":        ("Day of week",                    "星期"),
-    "is_weekend": ("Weekend",                        "週末"),
+    # these two already describe the whole fleet, so composing "…, fleet mean" onto them would
+    # read "Fleet anomaly count, fleet mean". Named exactly instead.
+    "fleet_anom":      ("Anomalous nodes, fleet-wide", "全機群異常節點數", ""),
+    "fleet_anom_frac": ("Anomalous node fraction, fleet-wide", "全機群異常節點比例", ""),
+    "rk_anom_o":  ("Rack anomaly rank", "機櫃異常排名", ""),
+    "rk_pre_o":   ("Rack pre-anomaly rank", "機櫃前兆排名", ""),
+    "rk_n":       ("Nodes reporting in rack", "機櫃回報節點數", ""),
+    "hour":       ("Hour of day (UTC)", "當日時段 (UTC)", ""),
+    "dow":        ("Day of week", "星期", ""),
+    "is_weekend": ("Weekend", "週末", ""),
 }
 
 # longest-first so "nb_mean_nz_" wins over "nb_", and "slope30m_" over "s30m_"... which it must:
@@ -155,17 +163,36 @@ def split_feature(name: str):
     return None
 
 
+# Statistics after which the base sensor's unit still applies. A mean, min, max, range, moving
+# average, lag or spatial aggregate of watts is still watts, and a standard deviation carries the
+# same unit too. A slope is unit-per-time, an acceleration unit-per-time-squared, a z-score and a
+# median-deviation ratio are dimensionless -- printing "(W)" on any of those would be wrong, so
+# those prefixes are deliberately absent from this set.
+UNIT_PRESERVING = {
+    "cur_", "m30m_", "m2h_", "m6h_", "s30m_", "s2h_", "s6h_",
+    "lo30m_", "hi30m_", "rng30m_", "lo2h_", "hi2h_", "rng2h_", "lo6h_", "hi6h_", "rng6h_",
+    "ewmaf_", "ewmas_", "nb_mean_nz_", "nb_max_nz_", "fleetmax_nz_", "fleet_",
+}
+
+def _with_unit(text: str, unit: str, keep: bool) -> str:
+    return f"{text} ({unit})" if (keep and unit) else text
+
+
 def label(name: str, curated: dict = None):
     """-> (en, zh) for one feature name.
 
-    `curated` is an optional {feature: (en, zh)} override -- meta.json's hand-written labels, which
-    stay authoritative where they exist so existing screens keep their wording.
+    NOTE on `curated`: meta.json's 20 hand-written labels are NOT used as an override by default,
+    and that is deliberate. Several of them name a statistic without naming its sensor -- "Power,
+    30-min slope" for `slope30m_totP` -- which is precisely what made it indistinguishable from
+    `slope30m_p0P` (CPU-0 power) on screen. Composition always names both, so it is authoritative
+    and every screen stays internally consistent. Pass `curated` explicitly only if some caller
+    genuinely wants the legacy wording.
     """
     name = str(name)
     if curated and name in curated:
         return curated[name]
     if name in STANDALONE:
-        return STANDALONE[name]
+        return STANDALONE[name][0], STANDALONE[name][1]
 
     parts = split_feature(name)
     if parts is None:
@@ -179,15 +206,18 @@ def label(name: str, curated: dict = None):
         return (name, name)
 
     prefix, base = parts
-    if prefix == "" or base in STANDALONE:
-        return STANDALONE.get(base, (base, base))
-    ben, bzh = BASE_SENSORS[base]
+    ben, bzh, unit = BASE_SENSORS[base]
+
     m = _LAG.match(name)
-    if m:
+    if m:                                        # lagN_: the raw value N slots back, unit intact
         n = m.group(1)
-        return (f"{ben}, {n} slot{'s' if n != '1' else ''} ago", f"{bzh} (前 {n} 個時槽)")
-    ten, tzh = STATISTICS[prefix]
-    return (ten.format(ben), tzh.format(bzh))
+        return (_with_unit(f"{ben}, {n} slot{'s' if n != '1' else ''} ago", unit, True),
+                _with_unit(f"{bzh} (前 {n} 個時槽)", unit, True))
+
+    keep = prefix in UNIT_PRESERVING
+    ten, tzh = STATISTICS[prefix][0], STATISTICS[prefix][1]
+    return (_with_unit(ten.format(ben), unit, keep),
+            _with_unit(tzh.format(bzh), unit, keep))
 
 
 def missing_labels(features) -> list:

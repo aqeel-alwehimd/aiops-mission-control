@@ -95,6 +95,57 @@ check("the old code's gap was real and BOTH-SIGNED (so it was never just 'pendin
 # ============================================================ 2. key names name their cohort
 print()
 print("=" * 100)
+print("1b. the SHARED cohort model -- the same definitions the auditor prompt is generated from")
+print("=" * 100)
+# The identities above are asserted by hand because that is what pins the arithmetic. These assert
+# that report.COHORT_IDENTITIES says the SAME thing, because that structure is what
+# report.cohort_prose() renders into the auditor's prompt. If the two ever disagree, the auditor is
+# being told something this suite does not check, which is exactly the drift this section prevents.
+bad_ident, bad_member, bad_noncont = [], [], []
+for frac, win, thr in GRID:
+    t = int(W0 + frac * (W1 - W0))
+    f = report.assemble_facts(store, t, {**BASE_POL, "alert_threshold": thr}, win)
+    for parts, whole in report.COHORT_IDENTITIES:
+        lhs = sum(report._fact_at(f, p) for p in parts)
+        rhs = report._fact_at(f, whole)
+        if lhs != rhs:
+            bad_ident.append((frac, win, thr, whole, lhs, rhs))
+
+f = report.assemble_facts(store, int(W0 + 0.7 * (W1 - W0)), BASE_POL, 24)
+for key in report.SET_OF_KEY:
+    if not isinstance(report._fact_at(f, key), (int, float)):
+        bad_member.append(key)
+for parts, whole in report.COHORT_IDENTITIES:
+    for k in tuple(parts) + (whole,):
+        if k not in report.SET_OF_KEY:
+            bad_ident.append(("unregistered key in an identity", k))
+for inner, outer, _why in report.COHORT_NON_CONTAINMENT:
+    for k in (inner, outer):
+        if k not in report.SET_OF_KEY:
+            bad_noncont.append(k)
+
+check(f"every key in report.SET_OF_KEY resolves to a number in the facts", not bad_member,
+      str(bad_member[:4]))
+check(f"report.COHORT_IDENTITIES holds at all {len(GRID)} sample points", not bad_ident,
+      str(bad_ident[:3]))
+check("every key named in an identity or a non-containment is registered in SET_OF_KEY",
+      not bad_noncont, str(bad_noncont[:4]))
+check("correct_warnings is the ONLY key belonging to two sets (it IS the overlap)",
+      [k for k, v in report.SET_OF_KEY.items() if len(v) > 1]
+      == ["prediction_outcomes.correct_warnings.count"],
+      str([k for k, v in report.SET_OF_KEY.items() if len(v) > 1]))
+prose = report.cohort_prose(f)
+check("cohort_prose() states every non-containment the model declares",
+      all(inner in prose and outer in prose for inner, outer, _ in report.COHORT_NON_CONTAINMENT))
+check("cohort_prose() carries THIS report's live values, not a static template",
+      str(report._fact_at(f, "prediction_outcomes.flagged_total")) in prose)
+print()
+print("  --- the prose block the auditor is given ---")
+for line in prose.split("\n"):
+    print("  " + line)
+
+print()
+print("=" * 100)
 print("2. key names are unambiguous about which cohort they count")
 print("=" * 100)
 f = report.assemble_facts(store, int(W0 + 0.7 * (W1 - W0)), BASE_POL, 24)

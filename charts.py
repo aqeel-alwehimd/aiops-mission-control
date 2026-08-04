@@ -43,6 +43,7 @@ class ChartId(str, Enum):
     FAILURES_OVER_TIME_LINES   = "failures_over_time_lines"
     TOP_FLAGGED_JOBS           = "top_flagged_jobs"
     NODE_RISK_WATCH            = "node_risk_watch"
+    NODE_SENSOR_TRACE          = "node_sensor_trace"
     NODE_FEATURE_CONTRIBUTIONS = "node_feature_contributions"
 
 
@@ -67,6 +68,10 @@ CHART_MENU = {
         "type predicted for each",
     ChartId.NODE_RISK_WATCH:
         "which nodes are on the watch list and how their P2 risk compares with the alert threshold",
+    ChartId.NODE_SENSOR_TRACE:
+        "what one node's RAW sensors actually did -- total power and GPU temperature at the native "
+        "20-second IPMI sampling rate, with the anomaly onset marked when one occurred. Use it to "
+        "show the physical behaviour behind a node alert rather than just its score",
     ChartId.NODE_FEATURE_CONTRIBUTIONS:
         "WHY the single highest-risk node is flagged -- the per-prediction feature contributions "
         "behind its score",
@@ -91,6 +96,7 @@ LAYOUT = {
     ChartId.FAILURES_OVER_TIME_LINES:   WIDTH_FULL,
     ChartId.TOP_FLAGGED_JOBS:           WIDTH_HALF,
     ChartId.NODE_RISK_WATCH:            WIDTH_HALF,
+    ChartId.NODE_SENSOR_TRACE:          WIDTH_FULL,   # a 1000-point time series needs the room
     ChartId.NODE_FEATURE_CONTRIBUTIONS: WIDTH_HALF,
 }
 
@@ -108,15 +114,24 @@ MAX_IMPORTANCE_BARS  = 12     # model-info panel
 # data -- dropping buckets would hide exactly the isolated single failure this chart exists to show.
 FOT_BIN_SECONDS = 900
 
-# node_risk_watch degeneracy rule.
-# P2 scores are extremely low across most of the fleet (fleet mean ~0.002 against a 0.50 alert
-# threshold), so on a quiet shift the "watch list" is three bars a couple of pixels tall sitting
-# under a reference line several times their height. That picture is not informative -- it reads as
-# "something is being measured" while telling an operator nothing about relative risk, and its only
-# honest summary is "no node is anywhere near the threshold", which the report already says in
-# words. So: the chart is shown only when the TALLEST bar reaches at least this fraction of the
-# alert threshold. Below that it reports itself unavailable rather than drawing stubs.
-NODE_RISK_MIN_FRACTION_OF_ALERT = 0.25
+# node_risk_watch degeneracy rule -- RETUNED 2026-08-03 against a 40-point sweep of the replay
+# period (sweep_report.py). What the sweep measured, with the alert threshold at 50%:
+#   top watch-node score   min 0.20%   median 2.90%   mean 10.57%   max 61.50%
+#   score buckets          <1%: 9pts   1-5%: 17   5-12.5%: 6   12.5-25%: 3   >=25%: 5
+# At the old 0.25 the chart rendered at 8/40 points (20%). The fleet really is quiet most of the
+# time, so silence is often correct -- but 20% is too rare for a chart that is the only view of
+# node risk.
+#
+# The original problem was never the low scores per se, it was the PICTURE: an in-plot reference
+# line at 50% forces the axis to 50%, so a 3% bar becomes a stub and the chart says nothing. That is
+# fixed properly below -- when the top bar is under the threshold the reference LINE is dropped, the
+# axis scales to the data so the bars are legible, and the subtitle states in words exactly how far
+# below the threshold the fleet is sitting. With the line gone there is no longer a reason to hide
+# a real ranking, so the bar is lowered to 0.10 (renders at 14/40 = 35%).
+#
+# It still refuses below that: under 10% of the threshold -- 5% absolute here -- the ordering of
+# watch-list nodes is noise-floor jitter, and ranking noise is worse than showing nothing.
+NODE_RISK_MIN_FRACTION_OF_ALERT = 0.10
 
 # palette -- the dashboard's existing accent colours, so a chart looks native to the panel
 C_GOOD    = "#34d399"   # emerald  -- correct / completed
@@ -182,6 +197,10 @@ FOT_OUTCOMES = (("failed",  "FAILED",        "chart.cat.failed",  C_BAD),
 
 def _hm(ts):
     return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).strftime("%m-%d %H:%M")
+
+
+def _hms(ts):
+    return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).strftime("%H:%M:%S")
 
 
 def failures_over_time(facts, store):
@@ -493,12 +512,35 @@ def _r_node_risk_watch(facts, store, t, policies):
             f"beside the reference line and would not show relative risk")
 
     vals = [round(float(n["risk_pct"]), 2) for n in rows]
+
+    # Two regimes, because one picture cannot serve both.
+    #  * top bar AT/ABOVE the threshold -> the comparison to the threshold is the story. Draw the
+    #    reference line and stretch the axis to include it.
+    #  * top bar BELOW it -> the line would pin the axis at 50% and flatten every bar into a stub,
+    #    which is what made this chart unreadable. Drop the line, scale the axis to the data so the
+    #    ranking is legible, and say the distance to the threshold in words instead.
+    at_threshold = top >= alert_pct
+    if at_threshold:
+        ref = {"value": round(alert_pct, 1), "label": _lbl_key("chart.ref.nodeAlert")}
+        axis_max = _pct_axis_max(vals, alert_pct)
+        subtitle = _lbl_key("chart.nodeRiskWatch.sub")
+    else:
+        ref = None
+        axis_max = round(min(100.0, top * 1.25), 2)
+        pct_of = (100.0 * top / alert_pct) if alert_pct else 0.0
+        subtitle = _lbl_bi(
+            f"All below the {alert_pct:.0f}% alert threshold — highest is {top:.2f}%, "
+            f"{pct_of:.0f}% of the way to it. Axis scaled to the data, so bar heights compare "
+            f"nodes with each other, not with the threshold.",
+            f"全部低於 {alert_pct:.0f}% 告警門檻 — 最高為 {top:.2f}%，僅達門檻的 {pct_of:.0f}%。"
+            f"座標軸依資料縮放，故長度為節點間的相互比較，非與門檻比較。")
+
     return ChartResult.ok(ChartId.NODE_RISK_WATCH, {
         "chart_id": ChartId.NODE_RISK_WATCH.value,
         "type": "bar",
         "width": LAYOUT[ChartId.NODE_RISK_WATCH],
         "title": _lbl_key("chart.nodeRiskWatch.title"),
-        "subtitle": _lbl_key("chart.nodeRiskWatch.sub"),
+        "subtitle": subtitle,
         "labels": [_lbl_text(f"node{int(n['node']):04d}") for n in rows],
         "datasets": [{"legend": _lbl_key("chart.legend.p2Risk"), "data": vals,
                       "colors": [(C_BAD if n.get("onset") or float(n["risk_pct"]) >= alert_pct
@@ -506,9 +548,291 @@ def _r_node_risk_watch(facts, store, t, policies):
         "point_notes": [_lbl_text(f"rack {int(n['rack'])} · {n.get('state', '')}") for n in rows],
         "axis_x": _lbl_key("chart.axis.node"),
         "axis_y": _lbl_key("chart.axis.riskPct"),
-        "axis_max": _pct_axis_max(vals, alert_pct),
-        "reference_line": {"value": round(alert_pct, 1), "label": _lbl_key("chart.ref.nodeAlert")},
+        "axis_max": axis_max,
+        "reference_line": ref,
         "value_suffix": "%",
+        "at_threshold": at_threshold,
+    })
+
+
+# ---- native-resolution sensor trace ---------------------------------------------------------------
+TRACE_SPAN_H       = 3.0    # hours either side of the onset (matches build_node_raw.ONSET_SPAN_H)
+MAX_TRACE_POINTS   = 1200   # above this the trace is binned to a min/max ENVELOPE, never averaged
+TRACE_FLAT_EPS     = 1e-9   # a series whose whole span is one constant value carries no information
+
+def _bin_envelope(rows, n_bins):
+    """Downsample by preserving each bin's MIN and MAX, never its mean.
+
+    Averaging is the one thing this chart must not do: the transients and drop-outs it exists to
+    show are exactly what a mean erases. An envelope keeps both extremes, so a one-sample spike
+    survives at any bin width.
+    """
+    total = len(rows)
+    width = max(1, -(-total // n_bins))          # ceil
+    out = []
+    for i in range(0, total, width):
+        chunk = rows[i:i + width]
+        ts = chunk[len(chunk) // 2][0]
+        def mm(j):
+            # tolerant of a row tuple shorter than j: a sensor that is not in this store yields an
+            # empty envelope rather than an IndexError deep inside the binning loop
+            vals = [c[j] for c in chunk if len(c) > j and c[j] is not None]
+            return (min(vals), max(vals)) if vals else (None, None)
+        plo, phi = mm(1)
+        tlo, thi = mm(2)
+        slo, shi = mm(3)                          # PSU-0 input power
+        out.append((ts, plo, phi, tlo, thi, slo, shi))
+    return out, width
+
+
+def _r_node_sensor_trace(facts, store, t, policies):
+    """One node's RAW power and temperature at native 20-second sampling, onset marked.
+
+    Node choice, in order:
+      1. a node with a recorded onset INSIDE the report window that also has raw coverage -- the
+         case this chart exists for, and the only case that gets a marker;
+      2. otherwise the highest-scoring watch-list node that has raw coverage, drawn with NO marker
+         and a subtitle saying plainly that no onset occurred and this is a healthy baseline.
+    A marker is never drawn where no event was recorded.
+    """
+    cid = ChartId.NODE_SENSOR_TRACE
+    if store is None or not getattr(store, "has_node_raw", lambda: False)():
+        return ChartResult.unavailable(cid, "no_store",
+                                       "native-resolution traces need the node_raw table; this "
+                                       "store does not carry it (run build_node_raw.py)")
+    covered = store.node_raw_nodes()
+    if not covered:
+        return ChartResult.unavailable(cid, "no_rows", "node_raw is present but empty")
+
+    w = facts.get("window") or {}
+    lo_w, hi_w = int(w.get("start_ts", 0)), int(w.get("end_ts", t))
+    span = int(TRACE_SPAN_H * 3600)
+
+    # ---- 1. an onset inside the window, on a node we have raw data for -------------------------
+    onset_ts = onset_node = None
+    for ev in (facts.get("node_onsets") or {}).get("events_full") or []:
+        if int(ev["node"]) in covered:
+            onset_node, onset_ts = int(ev["node"]), int(ev["ts"])
+            break
+    if onset_node is None:
+        # events_full is the unabridged list; fall back to querying the store directly
+        try:
+            ons = store._df("SELECT node, ts FROM node_events WHERE ts>? AND ts<=? ORDER BY ts",
+                            (lo_w, hi_w))
+            for r in ons.itertuples(index=False):
+                if int(r.node) in covered:
+                    onset_node, onset_ts = int(r.node), int(r.ts)
+                    break
+        except Exception:
+            pass
+
+    # Candidates in preference order. Coverage is per-node AND per-span -- an onset node's rows only
+    # exist around its own onset -- so "is this node in the roster" is not enough; each candidate is
+    # tried until one actually returns rows, rather than committing to the first and giving up.
+    cands = []
+    if onset_node is not None:
+        cands.append((onset_node, onset_ts - span, onset_ts + span, onset_ts))
+    for n in sorted((n for n in (facts.get("high_risk_nodes") or [])
+                     if isinstance(n, dict) and n.get("risk_pct") is not None
+                     and int(n["node"]) in covered),
+                    key=lambda n: -float(n["risk_pct"])):
+        cands.append((int(n["node"]), int(t) - 2 * span, int(t), None))
+    if not cands:
+        return ChartResult.unavailable(
+            cid, "no_rows",
+            f"no onset node in this window has a native-resolution trace, and none of the "
+            f"watch-list nodes is in the {len(covered)}-node raw roster")
+
+    node_id = lo = hi = df = None
+    for cand_node, cand_lo, cand_hi, cand_onset in cands:
+        got = store.node_raw_trace(cand_node, cand_lo, cand_hi)
+        if got is not None and len(got):
+            node_id, lo, hi, df = cand_node, cand_lo, cand_hi, got
+            onset_ts = cand_onset          # None for a baseline candidate: NO marker will be drawn
+            onset_node = cand_node if cand_onset is not None else None
+            break
+    if df is None:
+        return ChartResult.unavailable(
+            cid, "no_rows",
+            f"none of the {len(cands)} candidate node(s) has raw sensor rows inside this window's "
+            f"span; the raw roster covers each node only around its own onset")
+
+    def _v(x):
+        return None if x is None or x != x else float(x)     # NaN-safe
+    # PSU-0 input power leads, because it is the quantity the P2 triage actually runs on. It was
+    # unavailable at native resolution until ps0_input_power was located in the source tar (see
+    # build_node_raw.py); a store built before that has the column as NULL and this falls back to
+    # total power, which is what the chart used to plot on its own.
+    rows = [(int(r.ts), _v(r.power_w), _v(r.temp_c), _v(getattr(r, "ps0_w", None)))
+            for r in df.itertuples(index=False)]
+
+    # flat-line guard: a constant trace across the whole span shows nothing
+    pw = [x[1] for x in rows if x[1] is not None]
+    tc = [x[2] for x in rows if x[2] is not None]
+    ps = [x[3] for x in rows if x[3] is not None]
+    have_ps0 = bool(ps) and (max(ps) - min(ps) > TRACE_FLAT_EPS)
+    if not pw and not tc and not ps:
+        return ChartResult.unavailable(cid, "no_rows",
+                                       f"node{node_id:04d} has rows but no sensor values in this span")
+    flat_p = (not pw) or (max(pw) - min(pw) <= TRACE_FLAT_EPS)
+    flat_t = (not tc) or (max(tc) - min(tc) <= TRACE_FLAT_EPS)
+    if flat_p and flat_t and not have_ps0:
+        return ChartResult.unavailable(
+            cid, "degenerate",
+            f"node{node_id:04d}'s power and temperature are both constant across the whole span, "
+            f"so the trace is a flat line and shows nothing")
+
+    # ---- resolution: native if it fits, otherwise a min/max envelope ----------------------------
+    native_dt = 20
+    if len(rows) > 1:
+        deltas = sorted(rows[i + 1][0] - rows[i][0] for i in range(len(rows) - 1))
+        native_dt = max(1, deltas[len(deltas) // 2])
+    # SERIES ORDER IS THE ARGUMENT THIS CHART MAKES. PSU-0 input power is the feature the P2 triage
+    # runs on and the one genuinely predictive node-level signal in this project, so it leads and is
+    # drawn heaviest. Total node power stays alongside it as context on the SAME axis -- both are
+    # watts, so they are directly comparable and a second axis for them would be a lie. Temperature
+    # keeps the right axis. When ps0 is absent (a store written by the earlier two-metric builder)
+    # total power leads exactly as it did before, and the subtitle says which one is being read.
+    enveloped = len(rows) > MAX_TRACE_POINTS
+    if enveloped:
+        binned, width = _bin_envelope(rows, MAX_TRACE_POINTS)
+        stamps = [b[0] for b in binned]
+        datasets = []
+        if have_ps0:
+            datasets += [
+                {"legend": _lbl_key("chart.trace.ps0Max"), "data": [b[6] for b in binned],
+                 "color": C_BAD, "axis": "left",
+                 "style": {"line_width": 2.4, "point_radius": 0, "tension": 0, "order": 1}},
+                {"legend": _lbl_key("chart.trace.ps0Min"), "data": [b[5] for b in binned],
+                 "color": C_BAD, "axis": "left",
+                 "style": {"line_width": 1.0, "point_radius": 0, "tension": 0, "order": 2,
+                           "dash": [3, 3]}},
+            ]
+        datasets += [
+            {"legend": _lbl_key("chart.trace.powerMax"), "data": [b[2] for b in binned],
+             "color": C_MUTED if have_ps0 else C_BAD, "axis": "left",
+             "style": {"line_width": 1.6 if have_ps0 else 2.2, "point_radius": 0, "tension": 0,
+                       "order": 3}},
+            {"legend": _lbl_key("chart.trace.powerMin"), "data": [b[1] for b in binned],
+             "color": C_MUTED if have_ps0 else C_BAD, "axis": "left",
+             "style": {"line_width": 0.8, "point_radius": 0, "tension": 0, "order": 4,
+                       "dash": [3, 3]}},
+            {"legend": _lbl_key("chart.trace.tempMax"), "data": [b[4] for b in binned],
+             "color": C_INFO, "axis": "right",
+             "style": {"line_width": 1.4, "point_radius": 0, "tension": 0, "order": 5}},
+            {"legend": _lbl_key("chart.trace.tempMin"), "data": [b[3] for b in binned],
+             "color": C_INFO, "axis": "right",
+             "style": {"line_width": 0.8, "point_radius": 0, "tension": 0, "order": 6,
+                       "dash": [3, 3]}},
+        ]
+        res_en = (f"{width * native_dt}-second bins, min/max envelope "
+                  f"(from {native_dt}s native samples — not averaged)")
+        res_zh = f"{width * native_dt} 秒分箱，保留每箱最小/最大值（原始取樣 {native_dt} 秒，未取平均）"
+    else:
+        stamps = [r[0] for r in rows]
+        datasets = []
+        if have_ps0:
+            datasets.append(
+                {"legend": _lbl_key("chart.trace.ps0"), "data": [r[3] for r in rows],
+                 "color": C_BAD, "axis": "left",
+                 "style": {"line_width": 2.4, "point_radius": 0, "tension": 0, "order": 1}})
+        datasets += [
+            {"legend": _lbl_key("chart.trace.power"), "data": [r[1] for r in rows],
+             "color": C_MUTED if have_ps0 else C_BAD, "axis": "left",
+             "style": {"line_width": 1.6 if have_ps0 else 2.2, "point_radius": 0, "tension": 0,
+                       "order": 2}},
+            {"legend": _lbl_key("chart.trace.temp"), "data": [r[2] for r in rows],
+             "color": C_INFO, "axis": "right",
+             "style": {"line_width": 1.2, "point_radius": 0, "tension": 0, "order": 3}},
+        ]
+        res_en = f"{native_dt}-second native resolution, not resampled"
+        res_zh = f"{native_dt} 秒原始解析度，未重新取樣"
+
+    # ---- the onset marker sits on the TRUE timestamp, or is absent -------------------------------
+    # A NODE OFTEN STOPS REPORTING BEFORE ITS OWN ONSET -- that dropout is the P2 signal, not a data
+    # error (node0038's last sample is 8m20s before its recorded onset). Snapping the marker to the
+    # nearest existing sample would quietly move the event to whenever the node last spoke, which is
+    # a false statement about when it happened. Instead the axis is EXTENDED to the onset with empty
+    # slots, so the line visibly stops, the gap is the story, and the marker lands on the true time.
+    marker = None
+    gap_note_en = gap_note_zh = ""
+    if onset_node is not None and onset_ts is not None:
+        step = max(1, (width * native_dt) if enveloped else native_dt)
+        if onset_ts > stamps[-1]:
+            missing = int((onset_ts - stamps[-1]) // step)
+            if missing <= MAX_TRACE_POINTS // 4:          # bounded: never inflate the series
+                for _k in range(missing):
+                    stamps.append(stamps[-1] + step)
+                    for d in datasets:
+                        d["data"].append(None)
+            silent = onset_ts - rows[-1][0]
+            gap_note_en = (f" The node stopped reporting {silent // 60}m{silent % 60:02d}s before "
+                           f"the onset — the gap before the marker is that silence.")
+            gap_note_zh = (f" 該節點在 onset 前 {silent // 60} 分 {silent % 60:02d} 秒即停止回報，"
+                           f"標記前的空白即為該段靜默。")
+        idx = min(range(len(stamps)), key=lambda i: abs(stamps[i] - onset_ts))
+        marker = {"index": idx, "ts": onset_ts, "label": _lbl_key("chart.trace.onset"),
+                  "offset_s": int(abs(stamps[idx] - onset_ts))}
+
+    labels = [_lbl_text(_hms(s)) for s in stamps]
+
+    node_label = f"node{node_id:04d}"
+    # THE POWER SENTENCE. This used to state that the raw extract carried no PSU input-power metric,
+    # so the trace plotted total node power in its place. That was true of the EXTRACTED DIRECTORY
+    # and false of the source: ps0_input_power was in the tar all along, simply never unpacked --
+    # build_node_raw.py documents the trail from the feature name cur_ps0_inputP back to it. The
+    # subtitle now names whichever series is actually leading rather than apologising for one that
+    # no longer needs an apology, and it still says so plainly when a store predates the column.
+    if have_ps0:
+        power_en = ("The heavy red series is PSU-0 input power at native resolution — the feature "
+                    "the P2 triage actually runs on; total node power is drawn behind it for "
+                    "context, on the same watt axis.")
+        power_zh = ("粗紅線為 PSU-0 輸入功率（原始解析度），即 P2 分流實際使用的特徵；"
+                    "節點總功耗以淡色線作為對照，共用相同瓦特座標。")
+    else:
+        power_en = ("Power here is total node power, not the PSU-0 triage indicator: this store's "
+                    "node_raw predates the PSU series and carries no ps0_w column.")
+        power_zh = ("此處功耗為節點總功耗，非 PSU-0 分流指標："
+                    "本資料庫的 node_raw 建置於 PSU 序列之前，未含 ps0_w 欄位。")
+    if onset_node is not None:
+        sub = _lbl_bi(
+            f"{node_label} · anomaly onset at {_hms(onset_ts)} (marked) · ±{TRACE_SPAN_H:.0f}h · "
+            f"{res_en}.{gap_note_en} {power_en}",
+            f"{node_label} · 異常 onset 於 {_hms(onset_ts)}（已標記）· ±{TRACE_SPAN_H:.0f} 小時 · "
+            f"{res_zh}。{gap_note_zh} {power_zh}")
+    else:
+        sub = _lbl_bi(
+            f"{node_label} · NO onset occurred in this window — this is a healthy node's baseline "
+            f"trace, shown with no marker · {res_en}. {power_en}",
+            f"{node_label} · 本視窗內未發生 onset — 此為健康節點的基線軌跡，未標記任何事件 · "
+            f"{res_zh}。{power_zh}")
+
+    return ChartResult.ok(cid, {
+        "chart_id": cid.value,
+        "type": "line",
+        "width": LAYOUT[cid],
+        "title": _lbl_key("chart.trace.title.onset" if onset_node is not None
+                          else "chart.trace.title.baseline"),
+        "title_suffix": f" — {node_label}",
+        "subtitle": sub,
+        "labels": labels,
+        "datasets": datasets,
+        # two y-axes with units rather than normalising: watts and °C are not comparable numbers.
+        # BOTH power series share the left axis on purpose -- PSU-0 input and node total are both
+        # watts, and giving them separate scales would let the reader compare two shapes that are
+        # not to the same size.
+        "dual_axis": {"left":  {"label": _lbl_key("chart.trace.axisPower"), "unit": "W"},
+                      "right": {"label": _lbl_key("chart.trace.axisTemp"),  "unit": "°C"}},
+        "axis_x": _lbl_key("chart.trace.axisTime"),
+        "x_marker": marker,
+        "value_suffix": "",
+        "subject_node": node_id,
+        "onset_ts": onset_ts,
+        "enveloped": enveloped,
+        "native_dt": native_dt,
+        "point_count": len(stamps),
+        # which power signal is actually leading, so a test (or a reader) never has to infer it
+        "primary_power": "ps0_input" if have_ps0 else "total",
     })
 
 
@@ -550,13 +874,34 @@ def _r_node_feature_contributions(facts, store, t, policies):
     why = sorted(why, key=lambda w: float(w["contribution"]))
     vals = [round(float(w["contribution"]), 4) for w in why]
     node_label = detail.get("node_label") or f"node{node_id:04d}"
+
+    # THE TITLE MUST NOT ASSERT WHAT THE FACTS DENY.
+    # This chart explains the highest-SCORING node, which on a quiet shift is a perfectly healthy
+    # one. The old title said "Why this node is flagged" unconditionally, so a report stating "0
+    # nodes flagged" sat directly above a panel claiming node0109 was flagged at a 1.3% score. The
+    # chart is still worth drawing -- the strongest signal on a calm shift is useful -- but it has
+    # to say which question it is answering. The node's real state and score go in the subtitle so
+    # the reader can see the claim and its evidence together.
+    out = detail.get("output") or {}
+    state = str(detail.get("state") or "HEALTHY")
+    score_pct = out.get("risk_pct")
+    is_flagged = bool(out.get("flagged")) or state == "CRITICAL"
+    alert_pct = round(float(out.get("threshold", 0)) * 100.0, 1)
     return ChartResult.ok(ChartId.NODE_FEATURE_CONTRIBUTIONS, {
         "chart_id": ChartId.NODE_FEATURE_CONTRIBUTIONS.value,
         "type": "signed_hbar",
         "width": LAYOUT[ChartId.NODE_FEATURE_CONTRIBUTIONS],
-        "title": _lbl_key("chart.nodeContrib.title"),
+        "title": _lbl_key("chart.nodeContrib.title.flagged" if is_flagged
+                          else "chart.nodeContrib.title.topScoring"),
         "title_suffix": f" — {node_label}",
-        "subtitle": _lbl_key("chart.nodeContrib.sub"),
+        # the subtitle carries the node's ACTUAL state and score, so the panel is self-checking
+        "subtitle": _lbl_bi(
+            f"{state} · P2 score {score_pct}% vs a {alert_pct}% alert threshold · "
+            f"per-prediction contributions (log-odds)",
+            f"{state} · P2 分數 {score_pct}%，告警門檻 {alert_pct}% · "
+            f"該次預測的特徵貢獻 (log-odds)"),
+        "node_state": state,
+        "node_flagged": is_flagged,
         "labels": [_lbl_bi(w.get("label_en") or w["feature"], w.get("label_zh") or w["feature"])
                    for w in why],
         "datasets": [{"legend": _lbl_key("chart.legend.contribution"), "data": vals,
@@ -564,7 +909,9 @@ def _r_node_feature_contributions(facts, store, t, policies):
         "point_notes": [_lbl_key("d.increases") if float(w["contribution"]) > 0
                         else _lbl_key("d.decreases") for w in why],
         "axis_x": _lbl_key("chart.axis.logOdds"),
-        "reference_line": {"value": 0, "label": _lbl_key("chart.ref.zero")},
+        # the zero line is drawn but NOT labelled: the value axis already prints a 0 tick right
+        # under it, so the word only overlapped the axis and repeated what the tick said
+        "reference_line": {"value": 0, "label": None},
         "value_suffix": "",
         "subject_node": node_id,
     })
@@ -577,6 +924,7 @@ RENDERERS = {
     ChartId.FAILURES_OVER_TIME_LINES:   _r_failures_over_time_lines,
     ChartId.TOP_FLAGGED_JOBS:           _r_top_flagged_jobs,
     ChartId.NODE_RISK_WATCH:            _r_node_risk_watch,
+    ChartId.NODE_SENSOR_TRACE:          _r_node_sensor_trace,
     ChartId.NODE_FEATURE_CONTRIBUTIONS: _r_node_feature_contributions,
 }
 
@@ -586,7 +934,7 @@ RENDERERS = {
 DEFAULT_ORDER = [ChartId.PREDICTION_OUTCOMES, ChartId.JOB_OUTCOME_MIX,
                  ChartId.FAILURES_OVER_TIME_BARS, ChartId.FAILURES_OVER_TIME_LINES,
                  ChartId.TOP_FLAGGED_JOBS, ChartId.NODE_RISK_WATCH,
-                 ChartId.NODE_FEATURE_CONTRIBUTIONS]
+                 ChartId.NODE_SENSOR_TRACE, ChartId.NODE_FEATURE_CONTRIBUTIONS]
 
 
 # ============================================================ public helpers
@@ -688,14 +1036,43 @@ def default_caption(chart_id, facts, lang, chart=None) -> str:
                 if en else
                 f"{n} 個關注中節點與節點告警門檻的比較。")
 
-    if cid is ChartId.NODE_FEATURE_CONTRIBUTIONS:
-        node = (chart or {}).get("subject_node")
+    if cid is ChartId.NODE_SENSOR_TRACE:
+        c = chart or {}
+        node = c.get("subject_node")
         label = f"node{int(node):04d}" if node is not None else "this node"
-        return (f"Why {label} carries the highest P2 score right now: the signed per-prediction "
-                f"feature contributions behind it, in log-odds. Positive bars push the score up."
+        dt = c.get("native_dt", 20)
+        n = len(c.get("labels") or [])
+        if c.get("onset_ts"):
+            return (f"What {label} physically did around its anomaly onset: total power and GPU "
+                    f"temperature at the native {dt}-second sampling rate ({n} points), with the "
+                    f"onset marked at its true timestamp."
+                    if en else
+                    f"{label} 在異常 onset 前後的實際行為：以原始 {dt} 秒取樣率呈現總功耗與 "
+                    f"GPU 溫度（共 {n} 點），並在真實時間點標記 onset。")
+        return (f"No onset occurred in this window. This is {label}'s baseline: total power and GPU "
+                f"temperature at the native {dt}-second sampling rate ({n} points), with no event "
+                f"marker because no event was recorded."
                 if en else
-                f"{label} 目前 P2 分數最高的原因：該次預測各特徵的帶號貢獻（log-odds）。"
-                f"正值代表推高風險。")
+                f"本視窗內未發生 onset。此為 {label} 的基線：以原始 {dt} 秒取樣率呈現總功耗與 GPU "
+                f"溫度（共 {n} 點）；因無事件記錄，故不標記任何事件。")
+
+    if cid is ChartId.NODE_FEATURE_CONTRIBUTIONS:
+        c = chart or {}
+        node = c.get("subject_node")
+        label = f"node{int(node):04d}" if node is not None else "this node"
+        # the caption tracks the same flagged/not-flagged distinction as the title, so a quiet
+        # shift never reads as though a healthy node had tripped the alert
+        if c.get("node_flagged"):
+            return (f"Why {label} is flagged: the signed per-prediction feature contributions "
+                    f"behind its score, in log-odds. Positive bars push the score up."
+                    if en else
+                    f"{label} 被標記的原因：該次預測各特徵的帶號貢獻（log-odds）。正值代表推高風險。")
+        return (f"No node is flagged right now. {label} simply carries the highest P2 score, and "
+                f"these are the signed per-prediction contributions behind it, in log-odds. "
+                f"Positive bars push the score up."
+                if en else
+                f"目前沒有節點被標記。{label} 只是 P2 分數最高者，以下為該次預測各特徵的帶號貢獻"
+                f"（log-odds）。正值代表推高風險。")
 
     return ""
 
@@ -730,6 +1107,14 @@ def model_importance_panels(store) -> dict:
     panels, unavailable = [], []
     meta = getattr(store, "meta", None) or {}
 
+    def _feature_label(name):
+        """Human (en, zh) for a model feature, via the same resolver the drill-down uses."""
+        try:
+            import feature_labels
+            return feature_labels.label(name)
+        except Exception:
+            return (name, name)
+
     # ---- P3: stored. precompute.py computes it and meta.json carries it. -----------------------
     p3 = meta.get("p3_global_importance") or []
     labels_p3 = {}
@@ -753,9 +1138,8 @@ def model_importance_panels(store) -> dict:
             "scope_note": _lbl_key("mi.importance.scope"),
             "contrast_note": _lbl_key("mi.importance.vsPerPrediction"),
             "metric_note": _lbl_key("mi.importance.p3.metric"),
-            "labels": [_lbl_bi(labels_p3.get(r["feature"], (r["feature"],) * 2)[0],
-                               labels_p3.get(r["feature"], (r["feature"],) * 2)[1])
-                       for r in rows],
+            "labels": [_lbl_bi(*(labels_p3[r["feature"]][:2] if r["feature"] in labels_p3
+                                 else _feature_label(r["feature"]))) for r in rows],
             "datasets": [{"legend": _lbl_key("mi.importance.legend"), "data": vals,
                           "colors": [C_INFO] * len(vals)}],
             "axis_x": _lbl_key("mi.importance.p3.axis"),
@@ -765,18 +1149,48 @@ def model_importance_panels(store) -> dict:
         unavailable.append({"model_id": "P3", "code": "not_stored",
                             "reason": "meta.json carries no p3_global_importance"})
 
-    # ---- P2: NOT stored. Reported, not improvised. ---------------------------------------------
-    # demo.sqlite has per-slot LightGBM contributions (node_slots.contrib_json), and it would be easy
-    # to average |contribution| over the stored slots and call the result a global importance. That
-    # would be wrong twice over: it is a dataset-conditional average of LOCAL attributions, not the
-    # model's global importance, and the slim edition thins quiet nodes to hourly while keeping onset
-    # nodes at 15 minutes, so the sample it averages over is biased towards anomalous nodes. Getting
-    # a real P2 global importance means computing it where the model lives -- precompute.py or the
-    # notebook -- which is a deliberate decision for the owner of this project to make.
-    unavailable.append({
-        "model_id": "P2", "code": "not_stored",
-        "reason": "no stored global importance for the node model; meta.json carries only the 363 "
-                  "feature names, the 20 curated labels and per-prediction contributions. Deriving "
-                  "one by averaging stored per-slot contributions would be a biased local average, "
-                  "not a global importance, so it is not shown."})
-    return {"panels": panels, "unavailable": unavailable}
+    # ---- P2: LightGBM native GAIN, exported by export_p2_importance.py --------------------------
+    # A DIFFERENT METRIC from P3's, deliberately, because it is the one the model gives for free:
+    # the trained booster already carries gain, so this cost 0.2 ms rather than a permutation pass
+    # over the test set. The panels therefore measure different things -- P3 how much ACCURACY
+    # depends on a feature, P2 how much the fit USED it -- and the UI states each metric on its own
+    # panel and warns that the two are not comparable, rather than letting them sit side by side as
+    # if they were one measurement.
+    #
+    # Still refused: averaging node_slots.contrib_json into a pseudo-importance. That would be a
+    # dataset-conditional average of LOCAL attributions over a sample biased towards anomalous nodes
+    # (the slim edition thins quiet nodes to hourly), not a global importance.
+    p2 = meta.get("p2_global_importance") or []
+    if p2:
+        rows = sorted(p2, key=lambda d: float(d.get("importance", 0)),
+                      reverse=True)[:MAX_IMPORTANCE_BARS]
+        rows = list(reversed(rows))
+        vals = [round(float(r["importance"]), 1) for r in rows]
+        panels.append({
+            "chart_id": "model_importance_p2",
+            "model_id": "P2",
+            "type": "hbar",
+            "width": WIDTH_FULL,
+            "title": _lbl_key("mi.importance.p2.title"),
+            "subtitle": _lbl_key("mi.importance.p2.sub"),
+            "scope_note": _lbl_key("mi.importance.scope"),
+            "contrast_note": _lbl_key("mi.importance.vsPerPrediction"),
+            "metric_note": _lbl_key("mi.importance.p2.metric"),
+            # the same resolver the drill-down uses, so `fleetmax_nz_g0_cT` never reaches a screen
+            "labels": [_lbl_bi(*_feature_label(r["feature"])) for r in rows],
+            "datasets": [{"legend": _lbl_key("mi.importance.p2.legend"), "data": vals,
+                          "colors": [C_WARN] * len(vals)}],
+            "axis_x": _lbl_key("mi.importance.p2.axis"),
+            "point_notes": [_lbl_text(f"{r.get('share_pct', 0)}% of total gain") for r in rows],
+            "value_suffix": "",
+        })
+    else:
+        unavailable.append({
+            "model_id": "P2", "code": "not_stored",
+            "reason": "no stored global importance for the node model; run "
+                      "export_p2_importance.py to add p2_global_importance to meta.json"})
+
+    # the two panels do not measure the same thing, and the UI must not imply otherwise
+    return {"panels": panels, "unavailable": unavailable,
+            "comparable": False,
+            "incomparable_note": _lbl_key("mi.importance.incomparable")}
