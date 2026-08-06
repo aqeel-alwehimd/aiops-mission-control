@@ -1,0 +1,66 @@
+   size  rep  status   latency  out
+----------------------------------------------------
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 54.4s)
+   4543    1     200     54.4s  4174
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 57.2s)
+   4543    2     200     57.2s  4440
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   4543    3    FAIL     60.7s  HTTP 504 from endpoint after 1
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 54.8s)
+   4543    4     200     54.8s  3831
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   4938    1    FAIL     60.7s  HTTP 504 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   4938    2    FAIL     60.7s  HTTP 504 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   4938    3    FAIL     60.7s  HTTP 504 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: could not connect to endpoint [class=transient]
+[report.llm] [main] cooldown 25s after a connection failure
+   4938    4    FAIL      3.1s  could not connect to endpoint 
+[report.llm] [main] attempt 1/1 failed: read timeout [class=transient]
+[report.llm] [main] cooldown 25s after a read timeout
+   5362    1    FAIL     16.2s  read timeout after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5362    2    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5362    3    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5362    4    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5572    1    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5572    2    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5572    3    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5572    4    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5892    1    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5892    2    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5892    3    FAIL      0.7s  HTTP 502 from endpoint after 1
+[report.llm] [main] attempt 1/1 failed: HTTP 502 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 502
+   5892    4    FAIL      0.7s  HTTP 502 from endpoint after 1
+
+success rate by prompt size:
+    4543 chars: 3/4  ok-latency [54.4, 54.8, 57.2]  fail-latency [60.7]
+    4938 chars: 0/4  ok-latency -  fail-latency [3.1, 60.7, 60.7, 60.7]
+    5362 chars: 0/4  ok-latency -  fail-latency [0.7, 0.7, 0.7, 16.2]
+    5572 chars: 0/4  ok-latency -  fail-latency [0.7, 0.7, 0.7, 0.7]
+    5892 chars: 0/4  ok-latency -  fail-latency [0.7, 0.7, 0.7, 0.7]

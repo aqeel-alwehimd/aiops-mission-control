@@ -157,12 +157,19 @@ class Store:
         d["active"] = pend | run
         return d
 
-    def jobs(self, t: int, policies: dict, limit=200, state=None, sort="risk") -> dict:
+    def jobs(self, t: int, policies: dict, limit=200, state=None, sort="risk",
+             flagged_only=False) -> dict:
         thr = float(policies["alert_threshold"])
         d = self._job_board(t)
         if d.empty:
             return {"virtual_ts": t, "count": 0, "jobs": []}
         d["flagged"] = (d.risk >= thr) & d.active           # only in-flight jobs can be "flagged"
+        # `flagged_only` exists so a caller can request the flagged set COMPLETE rather than hoping a
+        # limit covers it. Sorting by risk and truncating does not: measured, the last flagged job
+        # sits at rank 816 at the default 0.30 threshold and rank 1,821 at 0.05, so any fixed limit
+        # silently drops flagged jobs as soon as the operator lowers the slider.
+        if flagged_only:
+            d = d[d.flagged]
         if state:
             d = d[d.status == state]
         srt = {"risk": ("risk", False), "elapsed": ("elapsed_min", False),
@@ -288,30 +295,40 @@ class Store:
         thr = float(policies["alert_threshold"])
         lo = t - LOG_WINDOW_H * 3600
         ev = []
+        # Every event carries the entity it is about as STRUCTURED DATA -- (kind, id) -- alongside the
+        # human message. The id is already in the message text, but only as formatted prose; a UI that
+        # recovered it by regex would keep working right up until someone reworded a sentence, and
+        # then fail silently and look like a dead button. Emitting it as a field makes "jump to this
+        # entity" a lookup rather than a parse.
         # 1) real node anomaly onsets (+ policy auto-isolation)
         on = self._df("SELECT * FROM node_events WHERE ts > ? AND ts <= ? ORDER BY ts", (lo, t))
         for r in on.itertuples(index=False):
+            node_ent = {"kind": "node", "id": int(r.node)}
             ev.append((int(r.ts), "ERROR", "P2 Detector",
                        f"Node node{int(r.node):04d} (rack {int(r.rack)}): monitoring-anomaly onset "
-                       f"detected [{r.kind}] within 30-min horizon."))
+                       f"detected [{r.kind}] within 30-min horizon.", node_ent))
             if policies.get("node_fail_guard_enabled", True):
                 ev.append((int(r.ts) + 1, "CRITICAL", "Auto-Isolation",
-                           f"Node node{int(r.node):04d} set to DRAIN and isolated from topology (policy)."))
+                           f"Node node{int(r.node):04d} set to DRAIN and isolated from topology (policy).",
+                           node_ent))
         # 2) jobs flagged at submission (threshold-dependent -> reflects the policy live)
         fj = self._df("SELECT * FROM jobs WHERE submit_ts > ? AND submit_ts <= ? AND risk >= ?", (lo, t, thr))
         for r in fj.itertuples(index=False):
             ev.append((int(r.submit_ts), "WARNING", "P3 Predictor",
                        f"Job {int(r.job_id)} (user_{int(r.user_id)}) flagged at submission: "
-                       f"predicted {r.pred_type} risk {r.risk*100:.0f}%. Checkpoint advised."))
+                       f"predicted {r.pred_type} risk {r.risk*100:.0f}%. Checkpoint advised.",
+                       {"kind": "job", "id": int(r.job_id)}))
         # 3) jobs that just ended as a failure (shows the model right or wrong, honestly)
         ej = self._df("SELECT * FROM jobs WHERE end_ts > ? AND end_ts <= ? AND state <> 'COMPLETED'", (lo, t))
         for r in ej.itertuples(index=False):
             hit = "correctly predicted" if r.risk >= thr else "missed by model"
             lvl = "ERROR" if r.risk >= thr else "INFO"
             ev.append((int(r.end_ts), lvl, "Auto-Healing",
-                       f"Job {int(r.job_id)} ended {r.state} ({hit}; submission risk {r.risk*100:.0f}%)."))
+                       f"Job {int(r.job_id)} ended {r.state} ({hit}; submission risk {r.risk*100:.0f}%).",
+                       {"kind": "job", "id": int(r.job_id)}))
         ev.sort(key=lambda x: x[0], reverse=True)
-        rows = [{"ts": e[0], "time": _hms(e[0]), "level": e[1], "module": e[2], "msg": e[3]} for e in ev[:int(limit)]]
+        rows = [{"ts": e[0], "time": _hms(e[0]), "level": e[1], "module": e[2], "msg": e[3],
+                 "entity": e[4]} for e in ev[:int(limit)]]
         return {"virtual_ts": t, "count": len(rows), "logs": rows}
 
     # -------------------------------------------------- DRILL-DOWN (input / output / why)

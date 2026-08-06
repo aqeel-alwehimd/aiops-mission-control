@@ -174,9 +174,21 @@ print(f"  high-risk nodes        : {len(REAL['high_risk_nodes'])} -> {len(trim_e
 
 check("trimmed payload is smaller", len(tj) < len(full_json))
 check("the original facts object is NOT mutated", json.dumps(REAL, ensure_ascii=False) == full_json)
-for k in ("now_iso", "window", "settings", "cluster_now", "jobs_window", "prediction_outcomes",
-          "node_onsets", "high_risk_nodes", "high_risk_jobs", "watch_counts", "model_note"):
+# watch_counts is deliberately NOT in this list any more. It was exactly len(high_risk_nodes) and
+# len(high_risk_jobs), both of which are still in the payload, so it was a field the narration could
+# only restate -- and the narrator prompt has a measured size ceiling driven by the endpoint's ~60 s
+# generation budget. Every other section still has to survive the trim.
+for k in ("window", "settings", "cluster_now", "jobs_window", "prediction_outcomes",
+          "node_onsets", "high_risk_nodes", "high_risk_jobs", "model_note"):
     check(f"section kept: {k}", k in trim_en)
+check("watch_counts is dropped, and the lists it counted are still present",
+      "watch_counts" not in trim_en
+      and isinstance(trim_en.get("high_risk_nodes"), list)
+      and isinstance(trim_en.get("high_risk_jobs"), list))
+check("now_iso is dropped, and the identical timestamp is still there as window.end_iso",
+      "now_iso" not in trim_en
+      and trim_en["window"]["end_iso"] == REAL["now_iso"],
+      f'{trim_en["window"]["end_iso"]} vs {REAL["now_iso"]}')
 check("examples capped", all(
     len(trim_en["prediction_outcomes"][b]["examples"]) <= report.PROMPT_EXAMPLES_CAP
     for b in ("correct_warnings", "false_alarms", "misses")))

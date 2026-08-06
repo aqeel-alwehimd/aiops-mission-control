@@ -10,6 +10,8 @@ so the demo path is served from disk and never depends on a live call.
     python prewarm_reports.py --mock         # no network: exercises the whole path with a stub
     python prewarm_reports.py --limit 4      # only the first N timestamps
     python prewarm_reports.py --clear        # delete the prewarm cache and exit
+    python prewarm_reports.py --demo         # the four sweep-selected demo moments, EN + ZH,
+                                             # retried until each passes the content gate
 
 Because only mode == "llm" results are cached, a prewarm entry is by construction a report that
 passed the hard gate; a fallback is never pinned.
@@ -73,13 +75,9 @@ def spread_timestamps(win_start, win_end, n=6):
 #   2. It must be TRUE. A cached report is served for as long as it is committed, so a fluent
 #      narrative containing a false relational claim would be pinned into the demo permanently --
 #      strictly worse than a template. Every candidate is therefore checked before it is blessed:
-#      the deterministic cohort-containment check first (free, exact), then the auditor if it is
-#      reachable. Anything with a high/medium finding is DISCARDED and regenerated, and the discard
-#      is reported rather than quietly retried.
-# A finding that says "the facts contain X and the narrative does not mention it". Heuristic, and
-# labelled as one: the auditor is not asked to tag its own findings by class, so this reads the
-# explanation text. It is used ONLY to decide what blocks, never to hide a finding -- every finding
-# is printed either way.
+#      the deterministic checks first (free, exact), then the auditor if it is reachable. Anything
+#      with a high/medium finding is DISCARDED and regenerated, and the discard is reported rather
+#      than quietly retried.
 # A LABEL ONLY. This used to decide what blocks, and it was the wrong tool for that job: it classifies
 # a free-text explanation by keyword, and the auditor writes those explanations however it likes. A
 # report saying "the four node isolation events at 13:45" where the facts record FIVE was explained as
@@ -97,8 +95,11 @@ def vet(d, facts):
     pinned. Four things block, and each earned its place by appearing in a real generated report
     during this run rather than by being imagined:
 
-      1. A FALSE CONTAINMENT, proved in Python by cohort_containment_review(). Exact, no judgment,
-         measured zero false positives across 160 template reports.
+      1. A FALSE CONTAINMENT, proved in Python by cohort_containment_review(), or an
+         OVER-GENERALISATION across a list, proved by overgeneralisation_review(). Exact, no
+         judgment, and both measured at zero false positives across 160 template reports. The second
+         one exists because two claims in the first batch -- "all six scored 98.6%" when one scored
+         98.0, and "four of these carry 98.6%" when five do -- were invisible to every other layer.
       2. THE WRONG LANGUAGE. Two of the first eight reports were written entirely in Chinese under
          lang="en". The numbers were right and the report was unservable.
       3. A RAW JSON LEAK. One agent reply was invalid JSON (a stray "]" after the model_note value),
@@ -115,21 +116,23 @@ def vet(d, facts):
          are still LABELLED as omissions in the output, because that label is useful to read and
          harmless to get wrong.
 
-    None of this replaces reading the narrative, and it is not claimed to. Two false claims in the
-    first batch were invisible to every check here -- "all six jobs scored 98.6%" when one scored
-    98.0, and "four of these carry 98.6%" when five do. Both are over-generalisations across a list,
-    and neither the numeric gate, the containment check nor the auditor caught them. The gate
-    converges the retry loop onto candidates worth reading; the final judgment on every cached
-    report was made by hand against the facts.
+    None of this replaces reading the narrative, and it is not claimed to. What it cannot see is
+    documented rather than assumed: a false containment stated in words with no second number, and a
+    quantifier attached to a categorical value that is ambiguous across the facts ("four
+    TIMEOUT-predicted jobs" -- TIMEOUT is also a SLURM state on the outcome examples, so the value
+    does not resolve to one list). The gate converges the retry loop onto candidates worth reading;
+    the final judgment on every cached report is made by hand against the facts.
     """
     blocking, notes = [], []
     text = d.get("text") or ""
     captions = [(c.get("chart_id"), c.get("caption")) for c in (d.get("charts") or [])
                 if c.get("caption_source") == "agent"]
 
-    for a in report.cohort_containment_review(
-            text, facts, [(f"caption on '{cid}'", cap) for cid, cap in captions]):
+    _caps = [(f"caption on '{cid}'", cap) for cid, cap in captions]
+    for a in report.cohort_containment_review(text, facts, _caps):
         blocking.append("deterministic containment: " + a["message"][:240])
+    for a in report.overgeneralisation_review(text, facts, _caps):
+        blocking.append("deterministic over-generalisation: " + a["message"][:240])
 
     for adv in (d.get("advisories") or []):
         if adv["code"] in (report.ADV_LANGUAGE, report.ADV_META):

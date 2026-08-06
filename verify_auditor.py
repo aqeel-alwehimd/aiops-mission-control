@@ -376,16 +376,16 @@ p = report._audit_prompt(report.trim_facts_for_prompt(FACTS, "en"), "draft",
                          identities=report.cohort_prose(FACTS),
                          captions=[("prediction_outcomes", "a caption the agent wrote")])
 for label, needle in (
-        ("states that numbers are ALREADY verified", "already verified"),
+        ("states that numbers are ALREADY verified", "has verified"),
         ("says re-checking a number is NOT its job", "is NOT your job"),
         ("names containment as the target class", "CONTAINMENT"),
         ("names the wrong-denominator class", "DENOMINATOR"),
         ("names unsupported causal claims", "CAUSATION"),
         ("names qualitative contradiction with no number", "QUALITATIVE CONTRADICTION"),
         ("names material omission", "MATERIAL OMISSION"),
-        ("carries a worked example of a real false claim", "sit within that cohort"),
+        ("carries a worked example of a real false claim", "sit within that"),
         ("carries a CORRECT counter-example so it is not taught to object to everything",
-         "CORRECT, DO NOT FLAG"),
+         "CORRECT -- DO NOT FLAG"),
         ("asks for findings, not a verdict", '"findings"'),
         ("requires the relational claims it checked to be enumerated",
          "relational_claims_checked"),
@@ -393,8 +393,11 @@ for label, needle in (
         ("includes the agent's caption in scope", "a caption the agent wrote"),
         ("tells it a caption is a claim", "a caption is a claim")):
     check(f"prompt {label}", needle in p, needle)
+# cohort_prose() now names keys by their last segment (the dotted paths cost ~500 characters of a
+# prompt with a measured ceiling). The statement is what matters, not the path.
 check("the prompt states the non-containment the live failures violated",
-      "misses.count is NOT part of" in p and "failures_resolved is NOT part of" in p)
+      "misses is NOT part of flagged_total" in p
+      and "failures_resolved is NOT part of flagged_total" in p, p[:0])
 check("the identities carry THIS report's live values",
       str(FACTS["prediction_outcomes"]["flagged_total"]) in p)
 check("the payload is still the TRIMMED view the narrator saw",
@@ -478,6 +481,57 @@ check("correct_warnings is never resolvable -- it genuinely belongs to two sets"
 check("the check never raises on junk input",
       report.cohort_containment_review(None, {}) == []
       and report.cohort_containment_review("x", None) == [])
+
+# Chinese. 之中 / 當中 are POSTPOSITIONS -- the container comes BEFORE them -- which is the opposite
+# of English "among". They were classified like the English word, so every Chinese phrasing using
+# them resolved backwards and could never fire. These pin the corrected direction.
+ZH_FALSE_A = "P3 於提交時標記了 331 個任務，其中包含 231 個已解決的失敗案例。"
+ZH_FALSE_B = "本圖涵蓋 331 個被標記任務當中，78 個為漏判失敗。"
+ZH_TRUE    = "P3 於提交時標記了 331 個任務；另有 78 個失敗從未被標記。"
+check("zh: 其中包含 places the contained quantity after the container and is caught",
+      len(report.cohort_containment_review(ZH_FALSE_A, FX)) == 1,
+      str(report.cohort_containment_review(ZH_FALSE_A, FX)))
+check("zh: 當中 is read as a postposition (container first), not like English 'among'",
+      len(report.cohort_containment_review(ZH_FALSE_B, FX)) == 1,
+      str(report.cohort_containment_review(ZH_FALSE_B, FX)))
+check("zh: a CORRECT sentence using 另有 to contrast is not flagged",
+      report.cohort_containment_review(ZH_TRUE, FX) == [], "the zh false-positive trap")
+print()
+
+# ============================================================ 16. over-generalisation across a list
+print("=" * 100)
+print("CASE 16 - overgeneralisation_review: a quantifier the list does not support")
+print("=" * 100)
+FX2 = {"high_risk_jobs": [{"job_id": i, "user": "user_1355", "risk_pct": r,
+                           "pred_type": "TIMEOUT", "status": "RUNNING"}
+                          for i, r in enumerate([98.6, 98.6, 98.6, 98.6, 98.6, 98.0])],
+       "high_risk_nodes": [], "node_onsets": {"count": 0, "events": []}}
+BAD_ALL   = "這6個高風險任務的風險評分均為98.6%。"
+BAD_COUNT = "Six in-flight jobs are on the watch list, and four of these carry a risk of 98.6%."
+OK_ALL    = "The six in-flight jobs all belong to user_1355."
+OK_TRUE   = "Five of the six in-flight jobs carry a risk of 98.6%."
+check("a universal quantifier over a value only 5 of 6 members carry is caught",
+      len(report.overgeneralisation_review(BAD_ALL, FX2)) == 1,
+      str(report.overgeneralisation_review(BAD_ALL, FX2)))
+check("   the advisory names the real count and the denominator",
+      "5 of the 6" in report.overgeneralisation_review(BAD_ALL, FX2)[0]["message"])
+check("a spelled-out count that does not match how many carry the value is caught",
+      len(report.overgeneralisation_review(BAD_COUNT, FX2)) == 1,
+      str(report.overgeneralisation_review(BAD_COUNT, FX2)))
+check("   and its code is its own", report.overgeneralisation_review(BAD_COUNT, FX2)[0]["code"]
+      == report.ADV_OVERGEN)
+check("a TRUE universal claim is not flagged", report.overgeneralisation_review(OK_ALL, FX2) == [],
+      str(report.overgeneralisation_review(OK_ALL, FX2)))
+check("a TRUE count is not flagged", report.overgeneralisation_review(OK_TRUE, FX2) == [],
+      str(report.overgeneralisation_review(OK_TRUE, FX2)))
+# the guard that took this from 8,971 false positives across 160 correct reports to zero
+check("DIGIT counts are not treated as claims (templates write digits in every sentence)",
+      report.overgeneralisation_review(
+          "131 jobs submitted, 42 flagged, 0 TIMEOUT, risk 98.6%.", FX2) == [],
+      "digits are the numeric gate's business, not this check's")
+check("the check never raises on junk input",
+      report.overgeneralisation_review(None, {}) == []
+      and report.overgeneralisation_review("x", None) == [])
 print()
 
 print("=" * 100)

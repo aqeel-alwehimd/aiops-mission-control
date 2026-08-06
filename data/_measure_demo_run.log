@@ -1,0 +1,62 @@
+preparing 4 demo moment(s) x 2 languages, length=full, window=6h
+cache file: D:\M100\P2\dashboard\data\report_cache.json
+up to 10 attempts each; a candidate with a relational finding is discarded
+
+[report.llm] [main] attempt 1/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 1.7s before attempt 2
+[report.llm] [main] attempt 2/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 3.7s before attempt 3
+[report.llm] [main] attempt 3/3 failed: read timeout [class=transient]
+[report.llm] [main] cooldown 25s after a read timeout
+  1664303261 en attempt 1: template (read timeout after 3 attempts) [151s]
+[report.llm] [main] attempt 1/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 1.8s before attempt 2
+[report.llm] [main] attempt 2/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 2.6s before attempt 3
+[report.llm] [main] attempt 3/3 failed: read timeout [class=transient]
+[report.llm] [main] cooldown 25s after a read timeout
+  1664303261 en attempt 2: template (read timeout after 3 attempts) [151s]
+[report.llm] [main] attempt 1/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 1.8s before attempt 2
+[report.llm] [main] attempt 2/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 3.2s before attempt 3
+[report.llm] [main] attempt 3/3 failed: read timeout [class=transient]
+[report.llm] [main] cooldown 25s after a read timeout
+  1664303261 en attempt 3: template (read timeout after 3 attempts) [151s]
+[report.llm] [main] attempt 1/3 ok (HTTP 200, 54.3s)
+[report.llm] [auditor] attempt 1/2 failed: read timeout [class=transient]
+[report.llm] [auditor] backing off 1.2s before attempt 2
+[report.llm] [auditor] attempt 2/2 failed: read timeout [class=transient]
+[report.llm] [auditor] cooldown 25s after a read timeout
+  1664303261 en attempt 4: llm but DISCARDED ON CONTENT [130s]
+        deterministic over-generalisation: In the narrative, "- Five node onset events were recorded, all logged as isolated incidents at 09-27 13:45:" attaches 'every one of them' to rack=45, but only 1 of the 5 entries in the node anomaly onsets in this window carry that value (cl
+        deterministic over-generalisation: In the narrative, "- Have an operator review and, if approved, contact           about the three RUNNING jobs flagged at a risk score of 99.6% each, given all three are predicted to end in TIMEOUT." attaches '3 of them' to risk_pct=99.6, bu
+        deterministic over-generalisation: In the narrative, "- Request a physical or telemetry check on the three isolated node onset events at rack 46, rack 16, and rack 19 (node 924, node 328, node 380), even though they are logged as isolated, before they recur or cluster." atta
+        deterministic over-generalisation: In the narrative, "- Request a physical or telemetry check on the three isolated node onset events at rack 46, rack 16, and rack 19 (node 924, node 328, node 380), even though they are logged as isolated, before they recur or cluster." atta
+        deterministic over-generalisation: In the narrative, "- Request a physical or telemetry check on the three isolated node onset events at rack 46, rack 16, and rack 19 (node 924, node 328, node 380), even though they are logged as isolated, before they recur or cluster." atta
+        deterministic over-generalisation: In the narrative, "- Request a physical or telemetry check on the three isolated node onset events at rack 46, rack 16, and rack 19 (node 924, node 328, node 380), even though they are logged as isolated, before they recur or cluster." atta
+        deterministic over-generalisation: In the caption on 'top_flagged_jobs', "The highest-risk in-flight jobs are three           jobs each carrying a risk score of 99.6%, all predicted to time out." attaches '3 of them' to risk_pct=99.6, but only 6 of the 6 entries in the high-
+[report.llm] [main] attempt 1/3 ok (HTTP 200, 48.2s)
+[report.llm] [auditor] attempt 1/2 ok (HTTP 200, 51.8s)
+  1664303261 en attempt 5: llm but DISCARDED ON CONTENT [100s]
+        deterministic over-generalisation: In the narrative, "On the infrastructure side, five isolated node onset events were recorded, including node 924 in rack 46, node 328 in rack 16, and node 380 in rack 19, all logged at 09-27 13:45." attaches 'every one of them' to rack=45, 
+        auditor[high] "On the flagged cohort of 331 jobs, 231 of the failures were resolved, giving a c" -- failures_resolved counts caught (153) plus missed (78) failures, and the 78 misses were never flagged, so 231 cannot sit inside the 331 flagged cohort
+[report.llm] [main] attempt 1/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 1.3s before attempt 2
+[report.llm] [main] attempt 2/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 2.6s before attempt 3
+[report.llm] [main] attempt 3/3 failed: read timeout [class=transient]
+[report.llm] [main] cooldown 25s after a read timeout
+  1664303261 en attempt 6: template (read timeout after 3 attempts) [151s]
+[report.llm] [main] attempt 1/3 ok (HTTP 200, 48.0s)
+[report.llm] [auditor] attempt 1/2 ok (HTTP 200, 43.0s)
+  1664303261 en attempt 7: llm but DISCARDED ON CONTENT [91s]
+        deterministic over-generalisation: In the narrative, "Five isolated node onset events were recorded, all at 09-27 13:45:" attaches 'every one of them' to rack=45, but only 1 of the 5 entries in the node anomaly onsets in this window carry that value (claim implies 5). Every 
+        auditor[high] "Overall, 231 failures were correctly resolved from the flagged cohort, for a cat" -- failures_resolved counts caught and missed failures together, so the 78 misses — jobs P3 never flagged — cannot sit 'from the flagged cohort', and cal
+[report.llm] [main] attempt 1/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 1.8s before attempt 2
+[report.llm] [main] attempt 2/3 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] backing off 2.3s before attempt 3
+[report.llm] [main] attempt 3/3 failed: read timeout [class=transient]
+[report.llm] [main] cooldown 25s after a read timeout
+  1664303261 en attempt 8: template (read timeout after 3 attempts) [151s]

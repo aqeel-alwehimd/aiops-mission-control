@@ -3,12 +3,38 @@
   "threshold_fp": 0.25,
   "runs": 3,
   "deterministic": {
-    "catch": 4,
-    "n_false": 7,
+    "catch": 8,
+    "n_false": 11,
     "fp": 0,
-    "n_clean": 6,
+    "n_clean": 8,
     "template_corpus_n": 160,
-    "template_corpus_fp": 0
+    "template_corpus_fp": {
+      "cohort_containment": 0,
+      "list_overgeneralisation": 0
+    }
   },
-  "llm": null
+  "llm": null,
+  "llm_transcribed": {
+    "provenance": "Aggregates TRANSCRIBED from the stdout of the 39-call run on 2026-08-04, not re-derived. The per-finding rows were destroyed by a --det-only re-run before _write() preserved the llm section; the fix is in place but could not recover them. Re-run measure_auditor.py to regenerate rows.",
+    "runs": 3,
+    "n_fixtures_at_time": 13,
+    "answered": 39,
+    "attempted": 39,
+    "http_failures": 0,
+    "timeouts": 0,
+    "catch_rate": 1.0,
+    "catch_hits": 21,
+    "catch_n": 21,
+    "fp_rate": 0.8333,
+    "fp_hits": 15,
+    "fp_n": 18,
+    "median_latency_s": 38.7,
+    "max_latency_s": 48.2,
+    "clean_findings_total": 16,
+    "clean_findings_omission_class": 16,
+    "clean_findings_other_classes": 0,
+    "median_relational_claims_checked": 8,
+    "runs_with_empty_checked_list": 0,
+    "outcome": "PARTIAL -- beats the 0/5 baseline on detection, fails the FP threshold"
+  }
 }

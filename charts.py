@@ -49,33 +49,24 @@ class ChartId(str, Enum):
 
 # One line per chart, sent to the agent so it can choose. Kept next to the enum so a new chart
 # cannot be added without writing the line that tells the agent what it answers.
+# What each chart answers, for the agent's selection. Kept DELIBERATELY TERSE: this block is sent
+# verbatim in every narrator prompt, and the measured failure mode on this endpoint is a ~60 s
+# generation limit, so every character here is competing with the report the agent has to write.
+# One clause per id. The long-form reasoning lives in the renderers and the README, not the prompt.
 CHART_MENU = {
     ChartId.PREDICTION_OUTCOMES:
-        "how the jobs P3 FLAGGED in this window have turned out so far -- caught (flagged and since "
-        "failed), false alarm (flagged and completed), pending (flagged, still running). These three "
-        "are the flagged cohort and sum to the flagged total. Missed failures are NOT in that cohort "
-        "-- they were never flagged -- and are shown beside the chart as a separate figure",
-    ChartId.JOB_OUTCOME_MIX:
-        "what the jobs that ended in this window ended as (completed / failed / timeout / OOM)",
-    ChartId.FAILURES_OVER_TIME_BARS:
-        "WHEN failures happened: jobs that ended in this window bucketed into 15-minute bins by end "
-        "time, stacked by outcome type (failed / timeout / OOM). Good for reading composition",
-    ChartId.FAILURES_OVER_TIME_LINES:
-        "the same 15-minute failure buckets drawn as lines, one per outcome type plus a total. Good "
-        "for reading the trend and spotting a burst",
-    ChartId.TOP_FLAGGED_JOBS:
-        "which in-flight jobs currently carry the highest predicted risk, coloured by the failure "
-        "type predicted for each",
-    ChartId.NODE_RISK_WATCH:
-        "which nodes are on the watch list and how their P2 risk compares with the alert threshold",
-    ChartId.NODE_SENSOR_TRACE:
-        "what one node's RAW sensors actually did -- total power and GPU temperature at the native "
-        "20-second IPMI sampling rate, with the anomaly onset marked when one occurred. Use it to "
-        "show the physical behaviour behind a node alert rather than just its score",
-    ChartId.NODE_FEATURE_CONTRIBUTIONS:
-        "WHY the single highest-risk node is flagged -- the per-prediction feature contributions "
-        "behind its score",
+        "how the FLAGGED jobs turned out: caught / false alarm / pending (these sum to the flagged "
+        "total; missed failures were never flagged and sit outside it)",
+    ChartId.JOB_OUTCOME_MIX:      "what jobs that ENDED here ended as: completed/failed/timeout/OOM",
+    ChartId.FAILURES_OVER_TIME_BARS:  "when failures happened: 15-min bins, stacked by outcome",
+    ChartId.FAILURES_OVER_TIME_LINES: "the same bins as lines plus a total: trend and bursts",
+    ChartId.TOP_FLAGGED_JOBS:     "highest-risk in-flight jobs, coloured by predicted failure type",
+    ChartId.NODE_RISK_WATCH:      "watch-list nodes' P2 risk against the alert threshold",
+    ChartId.NODE_SENSOR_TRACE:    "one node's raw 20-second power and temperature, onset marked",
+    ChartId.NODE_FEATURE_CONTRIBUTIONS: "why the top node is flagged: its feature contributions",
 }
+
+
 
 # ---- mandatory pairs -----------------------------------------------------------------------------
 # Charts that only make sense together. The bars and the lines plot IDENTICAL numbers from one

@@ -317,30 +317,31 @@ def cohort_prose(facts) -> str:
         x = _fact_at(facts, path)
         return "n/a" if x is None else x
 
-    L = ["The counts below are memberships of four DIFFERENT sets of jobs. Which set a quantity "
-         "belongs to is carried by its key name:"]
+    # Compressed wording, identical content: every set, every identity and every non-containment is
+    # still stated. Key names are shortened to their last segment because the section they live in is
+    # already given by the heading, and the full dotted paths cost ~500 characters for no added
+    # meaning. Nothing is dropped -- removing the identities is what made the auditor useless.
+    def short(p):
+        return p.rsplit(".", 1)[0].split(".")[-1] if p.endswith(".count") else p.split(".")[-1]
+
+    L = ["Counts below belong to four DIFFERENT job sets; the key name carries which:"]
     by_set = {}
     for key, sets in SET_OF_KEY.items():
         for s in sets:
-            by_set.setdefault(s, []).append(key)
+            by_set.setdefault(s, []).append(short(key))
     for s in (SET_SUBMITTED, SET_FLAGGED, SET_FAILED, SET_ENDED):
-        L.append(f"  - {SET_LABEL[s]}: {', '.join(sorted(by_set.get(s, [])))}")
-    L.append("")
-    L.append("These sums are exact at every report time, and this report is no exception:")
+        L.append(f"  {SET_LABEL[s]}: {', '.join(sorted(by_set.get(s, [])))}")
+    L.append("Exact at every report time, including this one:")
     for parts, whole in COHORT_IDENTITIES:
-        lhs = " + ".join(f"{p.rsplit('.', 1)[0].split('.')[-1] if p.endswith('.count') else p.split('.')[-1]}={v(p)}"
-                         for p in parts)
-        L.append(f"  - {lhs}  =  {whole.split('.')[-1]}={v(whole)}")
-    L.append("")
-    L.append("These containments DO NOT hold. A sentence placing the first quantity inside the "
-             "second is false even though both numbers are real:")
+        L.append("  " + " + ".join(f"{short(p)}={v(p)}" for p in parts)
+                 + f" = {short(whole)}={v(whole)}")
+    L.append("These containments DO NOT hold -- placing the first inside the second is false even "
+             "though both numbers are real:")
     for inner, outer, why in COHORT_NON_CONTAINMENT:
-        L.append(f"  - {inner} is NOT part of {outer} — {why}.")
-    L.append("")
-    L.append("correct_warnings is the ONE quantity that legitimately belongs to two sets: it is "
-             "exactly the overlap between the flagged jobs and the failures, i.e. the failures P3 "
-             "warned about. Every other count belongs to one set only, and quantities from "
-             "different sets can never be described as subsets of one another.")
+        L.append(f"  {short(inner)} is NOT part of {short(outer)}: {why}.")
+    L.append("correct_warnings is the ONLY quantity in two sets -- it is the overlap, the failures "
+             "P3 warned about. Every other count belongs to one set, and counts from different sets "
+             "are never subsets of one another.")
     return "\n".join(L)
 
 
@@ -940,17 +941,25 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?;:])\s+|[\n\r]+|(?<=[。！？；：])")
 # because outside an explicit between-position they have too many innocent readings ("in the last
 # 6 h"). C additionally requires an anaphor naming the container, and both require the pair to be
 # ADJACENT with nothing between them -- see the adjacency note in cohort_containment_review.
+# A DIRECTION BUG THE CHINESE FIXTURES EXPOSED. 之中 / 當中 / 之內 / 裡面 are POSTPOSITIONS: the
+# container comes BEFORE them ("442 個任務當中，127 個..."), which is the opposite of English "among",
+# where the container follows ("among the 442, 127..."). They were in the inner-first list, copying
+# the English ordering, so every Chinese phrasing using them resolved the wrong way round and could
+# never match a declared non-containment. They are outer-first cues and are now classified as such.
+# 屬於 / 隸屬 / 納入 / 計入 are genuine inner-first cues ("231 屬於 331"), and stay.
 _CUE_INNER_FIRST = (r"within", r"inside", r"among", r"amongst", r"out of", r"of the", r"of these",
                     r"of those", r"part of", r"belong(?:s|ed)? to", r"included in", r"in the",
                     r"sit(?:s)? in", r"fall(?:s)? (?:in|within)",
-                    r"之中", r"之內", r"當中", r"屬於", r"納入")
+                    r"屬於", r"隸屬(?:於)?", r"納入", r"計入", r"包含在", r"列入")
 _CUE_OUTER_FIRST = (r"including", r"includes", r"include", r"of which", r"comprising",
-                    r"made up of", r"consist(?:s|ing)? of", r"broken down into", r"其中", r"包括",
-                    r"包含", r"內含")
+                    r"made up of", r"consist(?:s|ing)? of", r"broken down into", r"of that",
+                    r"其中", r"包括", r"包含", r"內含", r"含有", r"當中", r"之中", r"之內",
+                    r"裡面", r"裏面", r"中的", r"細分為", r"分為", r"分別為")
 # the subset strong enough to be trusted when it is NOT between the two numbers
 _CUE_STRONG = (r"within", r"inside", r"among", r"amongst", r"part of", r"belong(?:s|ed)? to",
                r"included in", r"sit(?:s)? (?:in|within)", r"fall(?:s)? (?:in|within)",
-               r"of the", r"of these", r"of those", r"之中", r"之內", r"當中", r"屬於")
+               r"of the", r"of these", r"of those",
+               r"之中", r"之內", r"當中", r"屬於", r"隸屬(?:於)?", r"計入", r"納入")
 _CUE_INNER_RE  = re.compile("|".join(_CUE_INNER_FIRST), re.I)
 _CUE_OUTER_RE  = re.compile("|".join(_CUE_OUTER_FIRST), re.I)
 # rule D: a strong cue introducing the container's number. The gap between cue and number allows
@@ -961,10 +970,10 @@ _CUE_BEFORE_RE = re.compile(r"(?:" + "|".join(_CUE_STRONG) + r")[^\d]{0,40}$", r
 # rule C: a strong cue that starts just after the contained number and points back at a named group.
 # The window is cut at the next digit before matching (see _after_window), so this can never reach
 # across a third number and pair two quantities that are not adjacent.
-_CUE_AFTER_RE  = re.compile(r"^.{0,45}?(?:" + "|".join(_CUE_STRONG) + r")\s+"
+_CUE_AFTER_RE  = re.compile(r"^.{0,45}?(?:" + "|".join(_CUE_STRONG) + r")\s*"
                             r"(?:that|those|these|this|the|it|them|該|此|這些|那些)?\s*"
                             r"(?:cohort|set|group|total|jobs|figure|count|them|those|these|it"
-                            r"|群|集合|批|總數)", re.I | re.S)
+                            r"|群(?:組)?|集合|批|總數|任務|作業|佇列|名單)", re.I | re.S)
 
 def _after_window(sent: str, start: int, width: int = 90) -> str:
     """The text just after a number, truncated at the next digit. Rule C looks for a cue pointing
@@ -974,10 +983,14 @@ def _after_window(sent: str, start: int, width: int = 90) -> str:
     return w[:d.start()] if d else w
 
 # anything in the gap between the two numbers that says they are being contrasted, not nested
+# The Chinese side was thinner than the English side, which meant a correct Chinese sentence
+# contrasting two cohorts had fewer ways to be recognised as a contrast -- the direction that costs
+# false positives. Widened to match: explicit contrast markers, exclusion markers, and negations.
 _SEPARATOR_RE = re.compile(
     r"[;；]|\bseparately\b|\bwhereas\b|\bwhile\b|\bbut\b|\bhowever\b|\bby contrast\b|\bin contrast\b"
     r"|\bnever\b|\bnot\b|\bno\b|\boutside\b|\bdistinct\b|\bdifferent\b|\bunlike\b|\brather than\b"
-    r"|另外|另有|separately|而|但|卻|未|沒有|非|不同|以外|之外", re.I)
+    r"|另外|另有|另計|另|此外|除此之外|至於|反之|相對(?:地|而言)?|separately"
+    r"|而|但|卻|未(?:被|曾)?|沒有|並非|不是|非|不同|以外|之外|不屬於|不在|不計入|排除", re.I)
 
 CONTAINMENT_MAX_GAP = 140     # chars between the two numbers; beyond this it is not one claim
 
@@ -1092,6 +1105,210 @@ def cohort_containment_review(text: str, facts: dict, extra_texts=None) -> list:
                                        f"{SET_LABEL[cand[1]]}. {inner_key} is not part of "
                                        f"{outer_key} — {why}. Both numbers are real facts, so the "
                                        f"numeric gate cannot see this."})
+    return out
+
+
+# ---- OVER-GENERALISATION across a list ------------------------------------------------------------
+# THE GAP THIS CLOSES, and why it is provable.
+#
+# Two false claims survived every layer built so far, in live generated reports:
+#   "這6個高風險任務的風險評分均為98.6%"   -- five of the six scored 98.6; the sixth scored 98.0
+#   "four of these carry a predicted risk of 98.6%"  -- five do
+#   "four TIMEOUT-predicted jobs ..."     -- six were TIMEOUT
+# Every number in all three is a real fact, so the numeric hard gate passes them. No containment is
+# asserted, so cohort_containment_review says nothing. And the auditor cannot reliably see them
+# either, because trim_facts_for_prompt caps list sections at PROMPT_LIST_CAP (4) -- it is shown four
+# of six jobs, so "all six are TIMEOUT" genuinely is unsupported *from its view* and "four are" looks
+# right. That trimming is deliberate and correct for its own purpose; it just makes this class
+# structurally invisible to the model.
+#
+# It is provable here because the FULL facts hold the list. A claim of the form
+# "<quantifier-or-count> ... <value>" can be checked by counting how many list members carry that
+# value: a universal quantifier asserts ALL of them, a count asserts exactly that many.
+#
+# PRECISION, which is the whole game for an advisory. Four guards, all required:
+#   1. the value must resolve to exactly ONE (list, field) pair, and must not occur anywhere else in
+#      the facts tree -- the same ambiguity rule resolve_sets() uses;
+#   2. the list must be one this module registered, so the denominator is a set the code owns;
+#   3. the quantifier or count must sit within OVERGEN_MAX_GAP characters of the value, with no
+#      separator between them, so two unrelated clauses are never joined;
+#   4. a count claim only fires when the count is not already explained by the list length -- "the 6
+#      high-risk jobs" is a statement about the list, not about how many carry some value.
+ADV_OVERGEN = "list_overgeneralisation"
+
+# Lists in the facts whose members can be counted against a claim. Each entry names the fields worth
+# checking; a field is only useful here if a narrative would plausibly quote its value.
+OVERGEN_LISTS = {
+    "high_risk_jobs":   {"label_en": "the high-risk jobs on the watch list",
+                         "label_zh": "觀察名單上的高風險任務",
+                         "numeric": ("risk_pct",),
+                         "categorical": ("pred_type", "status", "user")},
+    "high_risk_nodes":  {"label_en": "the nodes on the watch list",
+                         "label_zh": "觀察名單上的節點",
+                         "numeric": ("risk_pct", "temp_c", "power_w", "fan_rpm", "psu0_w"),
+                         "categorical": ("state",)},
+    "node_onsets.events": {"label_en": "the node anomaly onsets in this window",
+                           "label_zh": "本視窗的節點異常事件",
+                           "numeric": ("rack",),
+                           "categorical": ("kind",)},
+}
+
+# universal quantifiers -- these assert that EVERY member carries the value
+_QUANT_ALL = re.compile(
+    r"\b(?:all|every|each|both|any of (?:them|these|those)|without exception|uniformly)\b"
+    r"|均|皆|全部|全數|都是|都為|一律|清一色|無一例外", re.I)
+# spelled-out counts, which the numeric gate never sees because they contain no digit
+_WORD_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+             "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "both": 2,
+             "a pair of": 2, "一": 1, "兩": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+             "七": 7, "八": 8, "九": 9, "十": 10}
+_WORD_NUM_RE = re.compile("|".join(sorted((re.escape(k) for k in _WORD_NUM), key=len, reverse=True)),
+                          re.I)
+OVERGEN_MAX_GAP = 60          # chars between the quantifier/count and the value it qualifies
+
+
+def _overgen_index(facts) -> dict:
+    """value -> (list_key, field, n_matching, n_total), for values that resolve UNAMBIGUOUSLY.
+
+    A value earns an entry only if exactly one (list, field) pair carries it anywhere in the facts
+    and it appears nowhere else in the tree. Anything shared -- a risk score that is also a node
+    temperature, a count that is also a rack number -- is dropped rather than guessed at.
+    """
+    hits, seen_elsewhere = {}, set()
+    tracked = set()
+
+    for lkey, spec in OVERGEN_LISTS.items():
+        rows = _fact_at(facts, lkey)
+        if not isinstance(rows, (list, tuple)) or not rows:
+            continue
+        n = len(rows)
+        for field in tuple(spec["numeric"]) + tuple(spec["categorical"]):
+            vals = [r.get(field) for r in rows if isinstance(r, dict)]
+            for v in set(x for x in vals if x is not None):
+                key = _overgen_key(v)
+                if key is None:
+                    continue
+                tracked.add((lkey, field, key))
+                hits.setdefault(key, set()).add(
+                    (lkey, field, sum(1 for x in vals if _overgen_key(x) == key), n))
+
+    # Every value living outside the tracked lists -- NUMBERS AND STRINGS ALIKE. The string half is
+    # what makes the categorical side usable at all: "TIMEOUT" is a pred_type on the watch list, but
+    # it is also a SLURM state on the outcome examples and a word the template writes constantly
+    # about the ended cohort. Collecting only numbers left every state token ambiguous, and the check
+    # paired each one with every number in its sentence -- 8,971 false positives across 160 correct
+    # reports, which is the measurement that forced this guard.
+    def walk(node, path):
+        if any(path == lk or path.startswith(lk + ".") for lk in OVERGEN_LISTS):
+            return
+        if isinstance(node, bool):
+            return
+        if isinstance(node, (int, float)):
+            seen_elsewhere.add(_overgen_key(node)); return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v, path)
+        elif isinstance(node, str):
+            seen_elsewhere.add(_overgen_key(node))
+            for tok in re.findall(r"[A-Za-z_]{3,}", node):     # tokens inside prose, e.g. "COMPLETED"
+                seen_elsewhere.add(tok.upper())
+            for m in _NUM.findall(node):
+                seen_elsewhere.add(_overgen_key(float(m)))
+    walk(facts, "")
+
+    return {v: next(iter(s)) for v, s in hits.items()
+            if len(s) == 1 and v not in seen_elsewhere}
+
+
+def _overgen_key(v):
+    """A comparable key for a field value: rounded number, or an upper-cased token."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return round(float(v), 2)
+    s = str(v).strip()
+    return s.upper() if s else None
+
+
+def overgeneralisation_review(text: str, facts: dict, extra_texts=None) -> list:
+    """Non-blocking flags where a sentence claims uniformity, or a count, that the list contradicts."""
+    index = _overgen_index(facts or {})
+    if not index:
+        return []
+
+    out, seen = [], set()
+    for where, body in [("narrative", text or "")] + list(extra_texts or []):
+        scrubbed = _blank(_SNAKE, _blank(_STRIP, body))
+        for sent in _SENT_SPLIT.split(scrubbed):
+            if not sent or not sent.strip():
+                continue
+            # candidate VALUES mentioned in this sentence: numbers, and categorical tokens
+            cands = []
+            for m in _NUM_POS.finditer(sent):
+                k = _overgen_key(_num_value(m.group(0)))
+                if k in index:
+                    cands.append((m.start(), m.end(), k))
+            for k, info in index.items():
+                if isinstance(k, str):
+                    for m in re.finditer(re.escape(k), sent, re.I):
+                        cands.append((m.start(), m.end(), k))
+            if not cands:
+                continue
+
+            # candidate CLAIMS: a universal quantifier, or a SPELLED-OUT count.
+            #
+            # Digits are deliberately NOT counts here. A template writes digits in every sentence
+            # ("131 jobs submitted, 42 flagged, 0 TIMEOUT"), so treating each one as a claim about
+            # how many list members carry some value manufactured thousands of false positives. A
+            # spelled-out quantity is the opposite: the narrator prompt explicitly tells the agent to
+            # write small quantities as words when they are not in the facts, Python never generates
+            # one, and both live failures of this class were spelled out ("four TIMEOUT-predicted
+            # jobs", "four of these carry"). Restricting to words is what makes the branch usable.
+            claims = [(m.start(), m.end(), "all", None) for m in _QUANT_ALL.finditer(sent)]
+            for m in _WORD_NUM_RE.finditer(sent):
+                claims.append((m.start(), m.end(), "count", _WORD_NUM[m.group(0).lower()]))
+
+            for cs, ce, kind, n_claim in claims:
+                for vs, ve, key in cands:
+                    # the claim must INTRODUCE the value: "four ... 98.6%", "均為 98.6". A number
+                    # appearing after the value it supposedly counts is a different sentence shape
+                    # and pairing across it was pure noise.
+                    if ce > vs:
+                        continue
+                    lo, hi = ce, vs
+                    gap = sent[lo:hi]
+                    if len(gap) > OVERGEN_MAX_GAP or _SEPARATOR_RE.search(gap):
+                        continue
+                    lkey, field, k_match, n_total = index[key]
+                    if kind == "all":
+                        if k_match >= n_total:
+                            continue
+                        claim_txt = "every one of them"
+                        expected = n_total
+                    else:
+                        # a count equal to the list length is a statement ABOUT the list, not a claim
+                        # that this many members carry the value
+                        if n_claim == k_match or n_claim == n_total:
+                            continue
+                        claim_txt = f"{n_claim} of them"
+                        expected = n_claim
+                    spec = OVERGEN_LISTS[lkey]
+                    shown = key if isinstance(key, str) else (f"{key:g}")
+                    quote = sent.strip()[:220]
+                    fp = (where, quote, lkey, field, key, kind, n_claim)
+                    if fp in seen:
+                        continue
+                    seen.add(fp)
+                    out.append({"code": ADV_OVERGEN, "kind": kind,
+                                "message": f"In the {where}, \"{quote}\" attaches "
+                                           f"'{claim_txt}' to {field}={shown}, but only "
+                                           f"{k_match} of the {n_total} entries in "
+                                           f"{spec['label_en']} carry that value "
+                                           f"(claim implies {expected}). Every number here is a "
+                                           f"real fact, so the numeric gate cannot see this."})
     return out
 
 
@@ -1305,8 +1522,13 @@ def _extract_text(res_data):
 # exceed its gateway limit). Trimming can never cause a guardrail failure: the allowed-number set is
 # built from the full facts, so anything the agent quotes from the trimmed subset is a subset of what
 # validates.
-PROMPT_EXAMPLES_CAP = 2      # was MAX_EX (4) per outcome bucket
-PROMPT_LIST_CAP     = 4      # onset events / high-risk nodes / high-risk jobs
+# Measured against the endpoint's ~60 s generation wall: a 4,543-char prompt succeeded 3 of 4 times,
+# 5,986 succeeded 4 of 8, and nothing at or above 7,961 succeeded at all. Every example row and every
+# list row is prompt bulk spent before the report is written, so these caps are a reliability setting
+# rather than a formatting preference. One example per bucket still gives the narration something
+# concrete to name in every outcome class; three rows still show a ranking.
+PROMPT_EXAMPLES_CAP = 1      # was MAX_EX (4) per outcome bucket
+PROMPT_LIST_CAP     = 3      # onset events / high-risk nodes / high-risk jobs
 
 def trim_facts_for_prompt(facts: dict, lang: str = "en") -> dict:
     """A narration-sized view of the facts. Drops fields the report never references."""
@@ -1330,10 +1552,38 @@ def trim_facts_for_prompt(facts: dict, lang: str = "en") -> dict:
         if isinstance(f.get(key), list):
             f[key] = f[key][:PROMPT_LIST_CAP]
 
-    # only the caveat for the requested language. This also removes the CJK string from an English
-    # payload, which was the one realistic way an English report picked up a language advisory.
-    mn = f.get("model_note", {})
-    mn.pop("caveat_zh" if lang != "zh" else "caveat_en", None)
+    # Only the requested language's prose. This used to cover model_note.caveat_* alone, which left
+    # BOTH cohort notes in every payload -- measured, 98 characters of Chinese sitting in every
+    # English prompt (and vice versa) that no narration could ever quote. It also removes the CJK
+    # string from an English payload, which was the one realistic way an English report picked up a
+    # language advisory.
+    drop = "_zh" if lang != "zh" else "_en"
+    f.get("model_note", {}).pop("caveat" + drop, None)
+
+    # Fields the narrative cannot make a claim about, or can only restate:
+    #   watch_counts   -- exactly len(high_risk_nodes) and len(high_risk_jobs), both already present
+    #   model_note.p3_threshold / p2_triage_pct -- verbatim duplicates of settings.*
+    #   now_iso        -- byte-identical to window.end_iso, which is right beside it
+    f.pop("watch_counts", None)
+    f.pop("now_iso", None)
+    for k in ("p3_threshold", "p2_triage_pct"):
+        f.get("model_note", {}).pop(k, None)
+
+    # The two cohort notes say overlapping things at length: one that submitted and ended are
+    # different job sets, the other that unfinished jobs are pending rather than errors. Both points
+    # are load-bearing -- they are what stops the narrative merging the cohorts -- so neither is
+    # dropped; they are merged into ONE short line. The FULL notes stay in `facts`, which is what the
+    # template renders and what the raw-facts panel shows; only the prompt copy is condensed.
+    jw, po = f.get("jobs_window", {}), f.get("prediction_outcomes", {})
+    if lang == "zh":
+        merged = ("「提交」與「結束」是不同的任務集合；報告時間尚未結束的任務計為「待定」，不計為誤判。")
+    else:
+        merged = ("Submitted and ended are different job sets; jobs not finished at the report time "
+                  "are pending, not errors.")
+    jw.pop("cohort_note_en", None); jw.pop("cohort_note_zh", None)
+    po.pop("cohort_en", None); po.pop("cohort_zh", None)
+    if po:
+        po["cohort_note"] = merged
     return f
 
 
@@ -1347,27 +1597,12 @@ def _chart_menu_block(lang: str) -> str:
     langname = "Traditional Chinese (繁體中文)" if lang == "zh" else "English"
     ids = "\n".join(f'  - "{cid.value}": {desc}' for cid, desc in chartreg.CHART_MENU.items())
     return (
-        "CHARTS:\n"
-        "You may also select charts to accompany the report. The dashboard computes every chart's "
-        "data itself from the database -- you do not describe, specify or supply any chart data.\n"
-        "Available chart ids, and what each one answers:\n"
+        "CHARTS: pick and caption. The dashboard computes all chart data; supply none.\n"
         f"{ids}\n"
-        "Rules for the chart selection:\n"
-        f'  - Return them under the key "chart_configs", as a list of objects with EXACTLY two '
-        f'fields: "chart_id" and "caption".\n'
-        '  - "chart_id" must be copied verbatim from the list above. Do not invent ids.\n'
-        f'  - "caption" is one short sentence of prose, written in {langname}, exactly like the '
-        f'rest of the report, saying what the operator should take from that chart.\n'
-        "  - A caption is held to the same standard as the report body: any number in it must come "
-        "from FACTS DATA. Writing no number at all is always safe.\n"
-        "  - A caption must describe the chart it sits under, and only that chart. Do not put a "
-        "number in a caption unless that number is actually shown in THAT chart -- a figure that is "
-        "real elsewhere in the facts is still wrong under a chart that does not plot it. In "
-        "particular, missed failures are NOT part of the flagged cohort, so never describe them as "
-        "being among the flagged jobs.\n"
-        f"  - Select only the charts that matter for THIS shift -- at most {MAX_CHARTS}, fewer is "
-        "fine, and none is a valid answer on a quiet shift.\n"
-        "  - Do NOT include titles, chart types, axes, series, colours, or any data values.\n"
+        f'Return "chart_configs": objects with EXACTLY "chart_id" (verbatim from above) and '
+        f'"caption" (one short sentence in {langname}). At most {MAX_CHARTS}; none is fine.\n'
+        "Caption rules as for the body: a number must be in FACTS DATA AND plotted in THAT chart; "
+        "no number is always safe. Missed failures are never part of the flagged cohort.\n"
     )
 
 
@@ -1378,37 +1613,30 @@ def _build_prompt(payload: dict, lang: str, length: str) -> str:
              if length == "brief" else
              "OUTPUT: cover situation, what happened, current risks, recommended actions "
              "and a model note")
+    # EVERY RULE HERE IS STILL ENFORCED SOMEWHERE DOWNSTREAM -- the wording is compressed, the
+    # requirements are not. Measured on this endpoint the failure mode is a ~60 s generation limit,
+    # so prompt bulk directly competes with the report the agent has to produce. Related rules are
+    # merged into one line each rather than dropped; the closed section list is still sent in full.
     rules = [
-        "Use ONLY the exact numbers, counts, and percentages provided in the FACTS DATA below.",
-        "DO NOT perform your own math, round numbers, or calculate new percentages.",
-        "If a statistic is not directly in FACTS DATA, do not include it.",
-        "Write every number EXACTLY as it appears in the JSON: no thousands separators, so write "
-        "1501 and not 1,501 or 1 501. Keep decimals exactly as given.",
-        "Do NOT number list items with digits (no '1.', '2.', 'Step 3'). Every list entry must be "
-        "plain text; the dashboard renders them as bullets itself.",
-        'Refer to metrics in PLAIN LANGUAGE, never by their raw JSON field name. Write "the node '
-        'alert score", not "p2_node_alert_score"; "the alert threshold", not "p3_alert_threshold".',
-        'Do NOT introduce counts or quantities of your own. If you must express a small quantity '
-        'that is not in the facts, write it as a word ("both", "all three"), never as a digit.',
-        "Report the model's MISSES honestly; never hide false alarms or missed failures.",
-        "Recommend actions for a human to approve. Never state or imply that an action was taken, "
-        "and never simulate touching infrastructure.",
-        f"{shape}. Prioritise what matters operationally: incidents, misses, high-risk items.",
-        "Return ONLY the report content itself. No preamble, no self-introduction, no explanation "
-        "of what you did.",
-        "NEVER mention producing, saving, attaching or downloading a file, and never refer to a "
-        "download card, link or attachment. Put the report text in your reply directly.",
-        "Do not describe yourself or your process ('I have generated...', 'As an AI...').",
-        "If you answer with a JSON object, every value must be a plain STRING of report prose (or "
-        "a list of strings), with the single exception of the chart selection described below; "
-        "no other nested objects, no file references.",
-        # the closed section vocabulary. Without this the agent split one section across
-        # `executive_summary` and `executive_summary_part2`, and the report grew a heading reading
-        # "Executive summary part2".
-        "The JSON keys are a CLOSED SET. Use only these, at most once each: "
-        + ", ".join(sorted(_SECTION_TITLES)) + ". "
-        "Never invent a key, never suffix one with part2/_2/_continued, and never split one "
-        "section across two keys -- if a section is long, keep it in a single string.",
+        "Use ONLY the numbers in FACTS DATA. Do no arithmetic of your own, invent no statistic, and "
+        "write each number exactly as it appears (no thousands separators: 1501, not 1,501).",
+        'Introduce no quantity of your own. If you must express one that is not in the facts, write '
+        'it as a word ("both", "all three"), never a digit.',
+        'Name metrics in plain language, never by JSON field name ("the alert threshold", not '
+        '"p3_alert_threshold").',
+        "Do not number list items with digits; the dashboard renders bullets itself.",
+        "Report misses and false alarms honestly. Recommend actions for a human to approve; never "
+        "state or imply an action was taken.",
+        f"{shape}. Prioritise incidents, misses and high-risk items.",
+        "Return report content ONLY -- no preamble, no self-introduction, no description of yourself "
+        "or your process, and never mention producing, saving, attaching or downloading a file.",
+        "If you answer with JSON, every value must be a plain string (or list of strings), except "
+        "the chart selection below. No other nested objects.",
+        # the closed section vocabulary, still listed in full -- this is what stopped the agent
+        # inventing `executive_summary_part2` and growing a heading to match.
+        "JSON keys are a CLOSED SET, each used at most once: "
+        + ", ".join(sorted(_SECTION_TITLES)) + ". Never invent or suffix a key, and never split a "
+        "section across two.",
     ]
     body = "\n".join(f"- {r}" for r in rules)
     # Charts belong to the full report panel; a brief report is one paragraph in a sidebar box with
@@ -1423,6 +1651,68 @@ def _build_prompt(payload: dict, lang: str, length: str) -> str:
         f"REMINDER: the entire response must be written in {langname}, and must contain the "
         f"report content only."
     )
+
+
+# ---------------------------------------------------------------- prompt size ceiling
+# WHY THIS IS A HARD CEILING WITH A TEST BEHIND IT.
+#
+# Measured on this endpoint: a report-sized narration prompt fails with HTTP 504 and a trivial one
+# succeeds, and the boundary is not sharp -- the SAME prompt fails and succeeds on consecutive
+# attempts, with every failure landing at ~60.7 s and every success under 60 s. The limit being hit
+# is the agent's own generation budget, and prompt bulk spends that budget before the report is
+# written. So prompt size is not a style question here; it is the difference between a working demo
+# and a permanent template fallback.
+#
+# The prompt grew by stealth: 5,881 -> 9,090 characters as the chart menu went from nothing to eight
+# richly-described ids and a closed section vocabulary was added. Nobody decided to do that. This
+# ceiling exists so that adding a chart or a section BREAKS A TEST rather than production --
+# verify_prompts.py fails loudly, and the same test asserts that every chart id and every section is
+# still present, so the ceiling can never be met by quietly dropping capability instead of verbosity.
+# TWO CEILINGS, NOT ONE, AND THE REASON IS MEASURED RATHER THAN ASSUMED.
+#
+# The binding constraint is the agent's ~60 s GENERATION budget, not its input size. Input matters
+# only because it spends part of that budget before any output is produced. The two agents therefore
+# have genuinely different limits, because they produce very different amounts of text:
+#
+#   narrator  writes a full multi-section report plus a chart selection -- 3,000-5,000 characters of
+#             output. Ladder, one attempt per probe, no retries:
+#                 5,986 chars in -> 2 of 4 succeeded  (successes 50.1 s / 59.9 s, failures 60.7 s)
+#                 7,961 / 9,090 / 14,446 / 18,463    -> 0 of 4, every failure at 60.7-60.9 s
+#             So it is already marginal at 6,000 and hopeless by 8,000.
+#   auditor   emits one compact JSON object -- a few hundred characters. It answered 39 of 39 calls
+#             at an ~11,259-character prompt on the same host the same day, which is larger than the
+#             narrator prompt that fails 100% of the time. Input size is demonstrably not what
+#             constrains it.
+#
+# Each ceiling sits BELOW a size that was observed to work for that agent, and above its current
+# size, so growth still breaks a test.
+PROMPT_CEILING = {
+    "narrator": int(os.environ.get("PROMPT_CEILING_NARRATOR", "5200")),
+    "auditor":  int(os.environ.get("PROMPT_CEILING_AUDITOR", "11000")),
+}
+
+def prompt_sizes(facts: dict) -> dict:
+    """Both prompts at their realistic worst, in both languages. -> {name: chars, ...}
+
+    The auditor is measured with a representative draft and a caption, because that is what it is
+    actually sent; measuring it with an empty draft would understate it by kilobytes.
+    """
+    draft = ("## Executive summary\nThe cluster submitted jobs and ended jobs this window. " * 30)
+    caps = [("prediction_outcomes", "How the jobs flagged this window actually turned out.")]
+    out = {}
+    for lang in ("en", "zh"):
+        payload = trim_facts_for_prompt(facts, lang)
+        out[f"narrator_{lang}"] = len(_build_prompt(payload, lang, "full"))
+        out[f"auditor_{lang}"] = len(_audit_prompt(payload, draft,
+                                                   identities=cohort_prose(facts), captions=caps))
+    out["ceiling_narrator"] = PROMPT_CEILING["narrator"]
+    out["ceiling_auditor"] = PROMPT_CEILING["auditor"]
+    out["worst_narrator"] = max(out["narrator_en"], out["narrator_zh"])
+    out["worst_auditor"] = max(out["auditor_en"], out["auditor_zh"])
+    out["over_ceiling"] = sorted(
+        k for k in ("narrator_en", "narrator_zh", "auditor_en", "auditor_zh")
+        if out[k] > PROMPT_CEILING["narrator" if k.startswith("narrator") else "auditor"])
+    return out
 
 
 def _attempt(invoke_url, bearer_secret, prompt, timeout, agent="main"):
@@ -1645,33 +1935,29 @@ _AUDIT_ADVISORY = {
 # Everything about HOW it is called is unchanged: invoke_agent, the auditor's own cooldown namespace
 # and retry profile, the 60s timeout (a 15s one answered 0/5), mode=="llm" and length=="full" only,
 # inside REPORT_TIME_BUDGET, seven distinct advisory codes, fail-open throughout.
+# One example per failure class, plus a counter-example. This block was four false examples and one
+# correct; the second containment example was a caption restating the first in a different location,
+# so it is the one that went. Removing the counter-example is not an option -- without it the auditor
+# is taught only to object -- and neither is removing a class.
 _AUDIT_EXAMPLES = """\
-WORKED EXAMPLES. These are real false claims that this auditor previously passed. Each one uses only
-real numbers, so the numeric checker had nothing to say about any of them.
+EXAMPLES. Real claims this auditor previously passed. All use real numbers, so the numeric checker
+had nothing to say about any of them.
 
-  FALSE: "P3 flagged 331 jobs at submission, and the 145 resolved failures sit within that cohort."
-    Why: failures_resolved counts caught AND missed failures. The missed ones were never flagged, so
-    the 145 cannot be inside the 331. Finding severity: high.
+  FALSE (containment, high): "P3 flagged 331 jobs, and the 145 resolved failures sit within that
+  cohort." failures_resolved counts caught AND missed failures; the missed ones were never flagged,
+  so 145 cannot be inside 331. The same error in a caption is equally false.
 
-  FALSE: "the 460 flagged jobs, including the 34 missed failures"
-    Why: same error in a caption. A missed failure is one that was NOT flagged; it cannot be part of
-    the flagged set. Finding severity: high.
+  FALSE (qualitative, no number, high): "Most of the flagged jobs have already been caught."
+  Facts: 17% caught, 71% pending. Nothing to check numerically, yet it contradicts the proportions.
+  A qualitative word is a claim about the data.
 
-  FALSE: "Most of the flagged jobs have already been caught."  (facts: 17% caught, 71% still pending)
-    Why: contains NO number, so nothing can be checked numerically -- and it still contradicts the
-    proportions. "Most" asserts a majority; the majority are pending, not caught. Finding severity:
-    high. A qualitative word is a claim about the data and you must check it against the numbers.
+  FALSE (quantity as a word, medium): "four TIMEOUT-predicted jobs appear on the watch list."
+  Facts: six. A spelled-out number is still a number and must match.
 
-  FALSE: "four TIMEOUT-predicted jobs appear on the watch list"  (facts: six such jobs)
-    Why: a quantity written as a WORD is still a quantity. Spelled-out numbers are not exempt from
-    matching the facts. Finding severity: medium.
-
-  CORRECT, DO NOT FLAG: "P3 flagged 331 jobs at submission; 108 have been confirmed as real
-  failures, 73 were false alarms and 150 have not finished yet. Separately, 37 failures were never
-  flagged at all."
-    Why it is fine: 108 + 73 + 150 = 331 is the flagged partition, and the 37 misses are stated as a
-    SEPARATE quantity rather than as a slice of the 331. Reporting misses honestly alongside the
-    flagged cohort is correct and required. Flagging this would be a false positive.
+  CORRECT -- DO NOT FLAG: "P3 flagged 331 jobs; 108 confirmed failures, 73 false alarms, 150 not
+  finished. Separately, 37 failures were never flagged." 108+73+150=331 is the flagged partition and
+  the misses are stated separately, not as a slice of it. Reporting misses alongside the flagged
+  cohort is correct and required.
 """
 
 def _audit_prompt(payload: dict, draft: str, identities: str = "", captions=None) -> str:
@@ -1685,28 +1971,22 @@ def _audit_prompt(payload: dict, draft: str, identities: str = "", captions=None
         "You are a Data Auditor reviewing an operational shift report. You are the SECOND check, "
         "not the first.\n\n"
 
-        "WHAT HAS ALREADY BEEN DONE FOR YOU, so you do not waste effort repeating it:\n"
-        "Deterministic code has already verified that EVERY number in this report traces to a value "
-        "in the FACTS DATA below. There are no invented figures. Checking whether a number exists in "
-        "the facts is NOT your job and finding that it does is not a result.\n\n"
+        "ALREADY DONE FOR YOU: deterministic code has verified that EVERY number in this report "
+        "traces to a value in FACTS DATA. There are no invented figures. Checking that a number "
+        "exists is NOT your job and finding that it does is not a result.\n\n"
 
-        "WHAT IS ACTUALLY YOUR JOB -- the RELATIONSHIPS between numbers, which no numeric check can "
-        "see because both numbers are real:\n"
-        "  (a) CONTAINMENT: a quantity described as being inside, among, part of or a subset of a "
-        "group it does not belong to.\n"
-        "  (b) DENOMINATOR: a rate, share, proportion or catch rate computed or described over the "
-        "wrong base set.\n"
-        "  (c) CAUSATION: a cause-and-effect or explanatory claim the facts do not support. The "
-        "facts are counts and measurements; they rarely license 'because'.\n"
-        "  (d) QUALITATIVE CONTRADICTION: a word like most, few, nearly all, the majority, largely, "
-        "rarely, dominated by -- with NO number attached -- that contradicts the underlying "
-        "proportions. These are invisible to every numeric check and you are the only thing that can "
-        "catch them.\n"
-        "  (e) MATERIAL OMISSION: bad news that is present in the facts and absent from the report -- "
-        "missed failures, a low catch rate, a node onset. Only flag an omission when the fact is in "
-        "the FACTS DATA below.\n\n"
+        "YOUR JOB -- the RELATIONSHIPS between numbers, which no numeric check can see because both "
+        "numbers are real:\n"
+        "  (a) CONTAINMENT: a quantity placed inside, among or as part of a group it is not in.\n"
+        "  (b) DENOMINATOR: a rate, share or catch rate computed over the wrong base set.\n"
+        "  (c) CAUSATION: a causal or explanatory claim the facts do not support; counts rarely "
+        "license 'because'.\n"
+        "  (d) QUALITATIVE CONTRADICTION: most / few / nearly all / the majority / largely, with NO "
+        "number attached, contradicting the proportions. Invisible to every numeric check -- you are "
+        "the only thing that can catch these.\n"
+        "  (e) MATERIAL OMISSION: bad news present in FACTS DATA and absent from the report.\n\n"
 
-        "HOW THE COUNTS RELATE TO EACH OTHER. Read this before judging any containment claim:\n"
+        "HOW THE COUNTS RELATE. Read before judging any containment claim:\n"
         f"{identities}\n\n"
 
         f"{_AUDIT_EXAMPLES}\n"
@@ -1717,22 +1997,14 @@ def _audit_prompt(payload: dict, draft: str, identities: str = "", captions=None
 
         f"REPORT NARRATIVE TO AUDIT:\n{draft}\n\n"
 
-        "Judge ONLY against the FACTS DATA above. It is the same data the writer was given, so a "
-        "fact that is absent from it was absent for the writer too and must never be flagged as "
-        "missing or unsupported.\n\n"
+        "Judge ONLY against FACTS DATA above -- the same data the writer had, so a fact absent from "
+        "it was absent for them too and must never be flagged as missing or unsupported.\n\n"
 
-        "Return ONLY a JSON object, with exactly these two keys:\n"
-        '{\n'
-        '  "relational_claims_checked": ["a short description of each relationship you examined, '
-        'whether or not it was wrong -- at least three entries"],\n'
-        '  "findings": [\n'
-        '    {"quote": "the exact span of text you object to, copied verbatim",\n'
-        '     "contradicts": "the fact key or identity it violates",\n'
-        '     "why": "one sentence on why it is false",\n'
-        '     "severity": "high | medium | low",\n'
-        '     "location": "narrative | caption"}\n'
-        '  ]\n'
-        '}\n'
+        "Return ONLY this JSON object:\n"
+        '{"relational_claims_checked": ["each relationship you examined, wrong or not; >=3 entries"],\n'
+        ' "findings": [{"quote": "exact span you object to, verbatim", "contradicts": "fact key or '
+        'identity violated", "why": "one sentence", "severity": "high|medium|low", '
+        '"location": "narrative|caption"}]}\n'
         "An EMPTY findings list is the correct answer for a sound report, and sound reports are "
         "common -- do not manufacture a finding to look diligent. But an empty list is only credible "
         "alongside a populated relational_claims_checked list showing what you actually examined."
@@ -2289,8 +2561,10 @@ def build_report(store, clock, policies, window_h=6, lang="zh", length="brief", 
     # LLM path only -- the template's own sentences are generated from these facts and cannot state a
     # false containment -- and it covers the body and the captions together.
     if mode == "llm":
-        advisories = list(advisories) + cohort_containment_review(
-            text, facts, [(f"caption on '{cid}'", cap) for cid, cap in agent_captions])
+        _cap_texts = [(f"caption on '{cid}'", cap) for cid, cap in agent_captions]
+        advisories = (list(advisories)
+                      + cohort_containment_review(text, facts, _cap_texts)
+                      + overgeneralisation_review(text, facts, _cap_texts))
 
     # ---- charts: computed here, from the facts and the store, for EVERY mode ----
     charts, charts_unavailable = [], []

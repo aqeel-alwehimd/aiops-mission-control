@@ -1,0 +1,53 @@
+ target  actual  run   status   latency  note
+----------------------------------------------------------------
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+    400    5986    1     FAIL     60.8s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 59.9s)
+    800    5986    1      200     59.9s  3241 chars back
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 50.1s)
+   1600    5986    1      200     50.1s  5082 chars back
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   3200    5986    1     FAIL     60.7s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   6400    7961    1     FAIL     60.7s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   9090    9090    1     FAIL     60.7s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+  13000   14446    1     FAIL     60.9s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+  18000   18463    1     FAIL     60.9s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+    400    5986    2     FAIL     60.4s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+    800    5986    2     FAIL     60.7s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 42.1s)
+   1600    5986    2      200     42.1s  4882 chars back
+[report.llm] [main] attempt 1/1 ok (HTTP 200, 53.9s)
+   3200    5986    2      200     53.9s  3879 chars back
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   6400    7961    2     FAIL     60.7s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+   9090    9090    2     FAIL     60.7s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+  13000   14446    2     FAIL     60.9s  HTTP 504 from endpoint after 1 attempt
+[report.llm] [main] attempt 1/1 failed: HTTP 504 from endpoint [class=transient]
+[report.llm] [main] cooldown 25s after HTTP 504
+  18000   18463    2     FAIL     61.0s  HTTP 504 from endpoint after 1 attempt
+
+summary by size:
+    5986 chars: 4/8 ok  latencies [60.8, 59.9, 50.1, 60.7, 60.4, 60.7, 42.1, 53.9]
+    7961 chars: 0/2 ok  latencies [60.7, 60.7]
+    9090 chars: 0/2 ok  latencies [60.7, 60.7]
+   14446 chars: 0/2 ok  latencies [60.9, 60.9]
+   18463 chars: 0/2 ok  latencies [60.9, 61.0]

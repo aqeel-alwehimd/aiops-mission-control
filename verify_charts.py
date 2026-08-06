@@ -523,9 +523,14 @@ check("the footnote explains why misses are not in the ring", bool(ch["footnote"
 check("the subtitle states what the segments sum to",
       ch["subtitle"]["key"] == "chart.predictionOutcomes.sub")
 check("the chart declares its cohort", ch["cohort_note"]["key"] == "chart.cohort.flagged")
-check("the agent menu names the cohort of each segment",
-      "flagged cohort" in chartreg.CHART_MENU[ChartId.PREDICTION_OUTCOMES]
-      and "NOT in that cohort" in chartreg.CHART_MENU[ChartId.PREDICTION_OUTCOMES])
+# The menu description was compressed when the narrator prompt was trimmed to fit the endpoint's
+# generation budget. What must survive is the COHORT STATEMENT, not any particular phrasing: the
+# three segments are the flagged set, and misses are outside it.
+_menu = chartreg.CHART_MENU[ChartId.PREDICTION_OUTCOMES]
+check("the agent menu says the segments are the flagged cohort and sum to its total",
+      "flagged" in _menu and "sum to the" in _menu, _menu)
+check("   and that missed failures sit OUTSIDE that cohort",
+      "never flagged" in _menu and "outside" in _menu, _menu)
 cap = chartreg.default_caption(ChartId.PREDICTION_OUTCOMES, FACTS, "en", ch)
 print(f"  python caption: {cap}")
 check("the Python caption separates the two cohorts rather than merging them",
@@ -643,8 +648,8 @@ check("   the structural guard is what prevents it: misses are not a ring segmen
       not any(l.get("key") == "chart.cat.missed" for l in oc["labels"])
       and oc["footnote"]["value"] == po["misses"]["count"])
 check("   and the prompt forbids describing misses as flagged",
-      "missed failures are NOT part of the flagged cohort"
-      in report._chart_menu_block("en"))
+      "Missed failures are never part of the flagged cohort"
+      in report._chart_menu_block("en"), report._chart_menu_block("en")[-260:])
 
 # ---- model-info panel stays out of the agent's reach -------------------------------------------------
 print()

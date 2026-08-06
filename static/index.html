@@ -6,6 +6,9 @@
     <title>Mission Control M100</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- PDF export. Client-side only: production is a read-only filesystem, so nothing may be
+         rendered or written server-side. ~380 KB, deferred so it never blocks first paint. -->
+    <script defer src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Noto+Sans+TC:wght@300;400;500;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <script>
@@ -31,6 +34,22 @@
         input[type=range] { accent-color:#22d3ee; }
         .na-tag { color:#64748b; font-style:italic; }
         .clickable { cursor:pointer; }
+        /* Entity cards. `overflow:hidden` is inherited from .glass-panel, which would clip the
+           highlight ring, so it is re-opened here. min-width:0 lets long ids truncate inside the
+           grid track instead of forcing the column wider. */
+        /* Column count follows the CONTAINER, not the viewport. Tailwind's sm:/xl: breakpoints key
+           off viewport width, which is wrong here: a fixed 256 px sidebar eats the space, so at a
+           narrow window the breakpoints still asked for three columns and squashed each card to
+           58 px. auto-fill + minmax reflows on the space actually available and never renders a
+           card below a legible width. */
+        .entity-grid { display:grid; gap:0.75rem; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); }
+        .entity-card { overflow:visible; min-width:0; transition:border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+        .entity-card:hover { border-color:rgba(34,211,238,0.5); transform:translateY(-1px); }
+        .jump-hit { animation:jumpPulse 2.6s ease-out; }
+        @keyframes jumpPulse {
+            0%,55%  { box-shadow:0 0 0 2px rgba(34,211,238,0.9), 0 0 22px rgba(34,211,238,0.55); }
+            100%    { box-shadow:0 0 0 0 rgba(34,211,238,0); }
+        }
         #panel { transition: transform 0.3s ease-out; transform: translateX(100%); }
         #panel.open { transform: translateX(0); }
         .detail-scroll::-webkit-scrollbar { width:6px; } .detail-scroll::-webkit-scrollbar-thumb { background:rgba(34,211,238,0.3); border-radius:3px; }
@@ -183,21 +202,10 @@
                             </select>
                         </div>
                     </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left border-collapse">
-                            <thead><tr class="bg-slate-800/50 text-slate-400 text-xs uppercase tracking-wider">
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.node">節點 (Node)</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.status">狀態 (Status)</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.tpf">溫度 / 功耗 / 風扇</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.p2risk">P2 風險分數</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50">VRAM</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50">PCIe</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50">MIG</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50 text-right" data-i18n="col.action">操作</th>
-                            </tr></thead>
-                            <tbody id="node-table-body" class="text-sm font-mono divide-y divide-slate-800/50"></tbody>
-                        </table>
-                    </div>
+                    <!-- One card per node. Same fields the table columns carried, same drill-down;
+                         a card keeps a node's status, telemetry and risk in one visual unit instead of
+                         spread across a row. Ordering is done client-side -- see orderNodes(). -->
+                    <div id="node-grid" class="p-4 entity-grid"></div>
                 </div>
             </div>
 
@@ -217,19 +225,7 @@
                                 <input id="job-search" oninput="renderJobs()" type="text" placeholder="Search Job / User..." data-i18n-ph="jobs.search" class="bg-slate-900 border border-slate-700 rounded-md py-1.5 pl-9 pr-4 text-sm text-white focus:outline-none focus:border-cyan-500 w-56"></div>
                         </div>
                     </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left border-collapse">
-                            <thead><tr class="bg-slate-800/50 text-slate-400 text-xs uppercase tracking-wider">
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.jobid">任務 ID (Job ID)</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.user">提交者 (User)</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.slurm">Slurm 狀態</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50 w-48" data-i18n="col.progress">進度 / 耗時</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50" data-i18n="col.airisk">AI 預測風險 (P3)</th>
-                                <th class="px-6 py-3 border-b border-slate-700/50 text-right" data-i18n="col.snap">分層重啟/快照</th>
-                            </tr></thead>
-                            <tbody id="job-table-body" class="text-sm divide-y divide-slate-800/50"></tbody>
-                        </table>
-                    </div>
+                    <div id="job-grid" class="p-4 entity-grid"></div>
                 </div>
             </div>
 
@@ -307,6 +303,8 @@
 
     <!-- Drill-down side panel -->
     <div id="overlay" class="fixed inset-0 bg-black/60 z-40 hidden" onclick="closePanel()"></div>
+    <!-- transient note for a jump that could not land on a card -->
+    <div id="jump-note" class="hidden"></div>
     <aside id="panel" class="fixed top-0 right-0 h-full w-[500px] max-w-full glass-panel rounded-none border-l border-cyan-500/30 z-40 overflow-y-auto overscroll-contain detail-scroll">
         <div id="panel-body" class="p-6"></div>
     </aside>
@@ -343,7 +341,8 @@
                         <option value="1">1 h</option><option value="6" selected>6 h</option><option value="12">12 h</option><option value="24">24 h</option>
                     </select>
                     <button onclick="copyReport()" class="text-xs border border-slate-600 text-slate-300 hover:text-white rounded px-2 py-1"><i class="fa-solid fa-copy"></i> <span id="report-copy-label" data-i18n="report.copy">複製</span></button>
-                    <button onclick="downloadReport()" class="text-xs border border-slate-600 text-slate-300 hover:text-white rounded px-2 py-1"><i class="fa-solid fa-download"></i> <span data-i18n="report.download">下載 .md</span></button>
+                    <button id="report-pdf-btn" onclick="downloadReportPdf()" class="text-xs border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-50 rounded px-2 py-1"><i class="fa-solid fa-file-pdf"></i> <span id="report-pdf-label" data-i18n="report.pdf">下載 PDF</span></button>
+                    <button onclick="downloadReport()" class="text-xs border border-slate-700 text-slate-400 hover:text-white rounded px-2 py-1" title=".md"><i class="fa-solid fa-download"></i> <span data-i18n="report.download">.md</span></button>
                     <button onclick="closeReport()" class="text-slate-400 hover:text-white ml-1"><i class="fa-solid fa-xmark text-lg"></i></button>
                 </div>
             </div>
@@ -387,7 +386,7 @@
             "slurm.title":"即時任務分佈 (Slurm States)","logs.title":"自動修復日誌牆 (Auto-Healing Logs)","logs.real":"真實事件 Real events",
             "dash.note":"此儀表板回放 Marconi100 ExaData 2022-09 真實測試期。每個數字都是真實模型 (P3 任務、P2 節點) 對真實資料的輸出；僅時間被壓縮。標示 N/A 的欄位該資料集未收集 (需 DCGM)。使用率為功耗推估之 proxy。",
             "nodes.note":"資料說明：Marconi100 節點為 IBM Power9 AC922 + 4× NVIDIA V100，非 DGX。溫度/功耗/風扇為真實 IPMI 遙測；VRAM 使用率、PCIe 錯誤率、MIG 狀態需 NVIDIA DCGM 遙測，此資料集未收集 → 標示 N/A。點擊任一列可查看該節點的模型輸入/輸出/歸因。",
-            "nodes.h":"硬體層監測 (IPMI Health Monitoring)","sort.risk":"排序：風險","sort.temp":"排序：溫度","sort.power":"排序：功耗","sort.node":"排序：節點",
+            "nodes.h":"硬體層監測 (IPMI Health Monitoring)","sort.temp":"排序：溫度","sort.power":"排序：功耗","sort.node":"排序：節點",
             "col.node":"節點 (Node)","col.status":"狀態 (Status)","col.tpf":"溫度 / 功耗 / 風扇","col.p2risk":"P2 風險分數","col.action":"操作",
             "jobs.h":"任務狀態預測與追蹤 (P3 Job Prediction)","filter.all":"全部狀態","jobs.search":"搜尋 任務 / 使用者...",
             "col.jobid":"任務 ID (Job ID)","col.user":"提交者 (User)","col.slurm":"Slurm 狀態","col.progress":"進度 / 耗時","col.airisk":"AI 預測風險 (P3)","col.snap":"分層重啟/快照",
@@ -401,8 +400,8 @@
             "d.input":"輸入 (INPUT)","d.output":"輸出 (OUTPUT)","d.why":"歸因 (WHY)","d.input.req":"資源請求","d.input.hist":"使用者歷史","d.imputed":"缺值→以中位數填補","d.null":"無值",
             "d.why.global":"全域重要性 (跨所有任務，非此列的個別歸因)","d.why.per":"個別預測歸因 (此時槽的 LightGBM 貢獻，log-odds)","d.importance":"重要性","d.thisval":"此列數值","d.contrib":"貢獻","d.increases":"↑ 提高風險","d.decreases":"↓ 降低風險",
             "d.risk":"風險分數","d.predclass":"預測類別","d.threshold":"操作門檻","d.flagged":"已標記","d.notflagged":"未標記","d.inscope":"評分中 (在分流範圍內)","d.outscope":"分流略過 (低功耗指標判為低風險)","d.close":"關閉","d.probs":"各類別機率",
-            "empty.jobs":"此時間點暫無任務","empty.nodes":"此時間點暫無節點資料","empty.logs":"此時間點暫無事件","node.triaged":"分流略過 (低風險)","job.ended":"已結束","risk.low":"低風險","risk.threshold":"門檻","node.showing":"顯示","node.of":"/","node.scoring":"評分中","node.band":"低功耗帶","node.anom":"異常","node.warn":"警示","job.showing":"顯示","job.rows":"筆 (在險/最近結束)",
-            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":"下載 .md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板","report.why":"回退原因","report.advisory":"提醒","report.draft":"遭退回的草稿 (AI 原文)",
+            "card.onset":"onset","card.temp":"溫度","card.power":"功耗","card.fan":"風扇","card.p2risk":"P2 風險分數","card.details":"詳細分析","card.undrain":"解除隔離","list.complete":"已載入全部，無截斷","job.flaggedAll":"件已標記（完整，未截斷）","job.tailShown":"件未標記（節錄）","job.tailTrunc":"未標記的其餘任務已截斷（已標記者全數顯示）","log.jump":"跳至此實體","jump.notInList":"{id} 不在目前列表中，已直接開啟其詳細面板。","jump.unreachable":"無法取得 {id}：此實體不在測試資料集中。","sort.risk":"排序：警示優先","report.pdf":"下載 PDF","report.pdf.working":"產生 PDF 中…","report.pdf.font":"下載中文字型…","report.pdf.fail":"PDF 產生失敗，請改用 .md","empty.jobs":"此時間點暫無任務","empty.nodes":"此時間點暫無節點資料","empty.logs":"此時間點暫無事件","node.triaged":"分流略過 (低風險)","job.ended":"已結束","risk.low":"低風險","risk.threshold":"門檻","node.showing":"顯示","node.of":"/","node.scoring":"評分中","node.band":"低功耗帶","node.anom":"異常","node.warn":"警示","job.showing":"顯示","job.rows":"筆 (在險/最近結束)",
+            "report.generate":"產生交接報告","report.title":"交接報告","report.window":"視窗","report.copy":"複製","report.copied":"已複製","report.download":".md","report.rawfacts":"原始事實 (JSON — 報告的依據)","report.generatedAt":"產生於 (虛擬時間)","report.loading":"產生中…","report.mode.llm":"AI 生成 (數字已驗證)","report.mode.template":"模板 (離線)","report.mode.rejected":"模板 (AI 輸出未通過數字檢核)","report.mode.short.llm":"AI","report.mode.short.template":"模板","report.why":"回退原因","report.advisory":"提醒","report.draft":"遭退回的草稿 (AI 原文)",
             // charts: every label a reader sees that is NOT data. The values themselves arrive
             // fully computed from /api/report and are never touched here.
             "chart.section":"圖表 (資料由後端計算)","chart.skipped":"未產生的圖表",
@@ -446,7 +445,7 @@
             "slurm.title":"Live job distribution (Slurm)","logs.title":"Auto-Healing Logs","logs.real":"Real events",
             "dash.note":"This dashboard replays the real Marconi100 ExaData 2022-09 test period. Every number is a real model output (P3 jobs, P2 nodes) on real data; only time is compressed. Fields marked N/A are not collected in this dataset (need DCGM). Utilisation is a power-derived proxy.",
             "nodes.note":"Note: Marconi100 nodes are IBM Power9 AC922 + 4× NVIDIA V100, not DGX. Temperature/power/fan are real IPMI telemetry; VRAM usage, PCIe error rate and MIG status need NVIDIA DCGM telemetry which this dataset does not carry → shown as N/A. Click any row to see that node's model input / output / attribution.",
-            "nodes.h":"Hardware monitoring (IPMI Health)","sort.risk":"Sort: risk","sort.temp":"Sort: temp","sort.power":"Sort: power","sort.node":"Sort: node",
+            "nodes.h":"Hardware monitoring (IPMI Health)","sort.temp":"Sort: temp","sort.power":"Sort: power","sort.node":"Sort: node",
             "col.node":"Node","col.status":"Status","col.tpf":"Temp / Power / Fan","col.p2risk":"P2 risk score","col.action":"Action",
             "jobs.h":"Job outcome prediction & tracking (P3)","filter.all":"All states","jobs.search":"Search Job / User...",
             "col.jobid":"Job ID","col.user":"User","col.slurm":"Slurm state","col.progress":"Progress / elapsed","col.airisk":"AI predicted risk (P3)","col.snap":"Restart / checkpoint",
@@ -460,8 +459,8 @@
             "d.input":"INPUT","d.output":"OUTPUT","d.why":"WHY","d.input.req":"Resource request","d.input.hist":"User history","d.imputed":"null → median-imputed","d.null":"no value",
             "d.why.global":"Global importance (across all jobs — NOT this row's per-prediction attribution)","d.why.per":"Per-prediction attribution (this slot's LightGBM contributions, log-odds)","d.importance":"importance","d.thisval":"this row","d.contrib":"contribution","d.increases":"↑ raises risk","d.decreases":"↓ lowers risk",
             "d.risk":"Risk score","d.predclass":"Predicted class","d.threshold":"Operating threshold","d.flagged":"Flagged","d.notflagged":"Not flagged","d.inscope":"Scored (in triage scope)","d.outscope":"Triaged out (cheap power indicator judged it low-risk)","d.close":"Close","d.probs":"Class probabilities",
-            "empty.jobs":"No jobs at this time","empty.nodes":"No node data at this time","empty.logs":"No events at this time","node.triaged":"Triaged (low-risk)","job.ended":"Ended","risk.low":"Low","risk.threshold":"threshold","node.showing":"Showing","node.of":"of","node.scoring":"scoring","node.band":"low-power band","node.anom":"anomalous","node.warn":"at-risk","job.showing":"Showing","job.rows":"rows (active / recently ended)",
-            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":"Download .md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl","report.why":"Fallback reason","report.advisory":"Advisory","report.draft":"Rejected draft (agent's own text)",
+            "card.onset":"onset","card.temp":"Temp","card.power":"Power","card.fan":"Fan","card.p2risk":"P2 risk score","card.details":"Details","card.undrain":"Un-drain","list.complete":"full set loaded, nothing truncated","job.flaggedAll":"flagged (complete, not truncated)","job.tailShown":"unflagged shown","job.tailTrunc":"unflagged remainder truncated (every flagged job is shown)","log.jump":"Jump to this entity","jump.notInList":"{id} is not in the current list; its detail panel was opened directly.","jump.unreachable":"Could not reach {id}: it is not in the test cohort.","sort.risk":"Sort: alerts first","report.pdf":"Download PDF","report.pdf.working":"Building PDF…","report.pdf.font":"Fetching Chinese font…","report.pdf.fail":"PDF generation failed — use .md instead","empty.jobs":"No jobs at this time","empty.nodes":"No node data at this time","empty.logs":"No events at this time","node.triaged":"Triaged (low-risk)","job.ended":"Ended","risk.low":"Low","risk.threshold":"threshold","node.showing":"Showing","node.of":"of","node.scoring":"scoring","node.band":"low-power band","node.anom":"anomalous","node.warn":"at-risk","job.showing":"Showing","job.rows":"rows (active / recently ended)",
+            "report.generate":"Generate shift report","report.title":"Shift report","report.window":"Window","report.copy":"Copy","report.copied":"Copied","report.download":".md","report.rawfacts":"Raw facts (JSON — the evidence behind this report)","report.generatedAt":"Generated at (virtual time)","report.loading":"Generating…","report.mode.llm":"AI-generated (numbers validated)","report.mode.template":"Template (offline)","report.mode.rejected":"Template (AI output failed numeric check)","report.mode.short.llm":"AI","report.mode.short.template":"Tmpl","report.why":"Fallback reason","report.advisory":"Advisory","report.draft":"Rejected draft (agent's own text)",
             "chart.section":"Charts (computed server-side)","chart.skipped":"Charts skipped",
             "chart.predictionOutcomes.title":"P3 warning outcomes (flagged jobs)","chart.predictionOutcomes.sub":"The three segments sum to the flagged total. Missed failures are not in the ring — see the note below",
             "chart.predictionOutcomes.missNote":"Missed failures were never flagged, so they are a different cohort and cannot be a slice of this ring",
@@ -510,7 +509,12 @@
         }
 
         // ================= state =================
-        let currentTab='dashboard', scrubbing=false, lastJobs=[], cutoffs={}, curThr=0.30, lastDetail=null;
+        let currentTab='dashboard', scrubbing=false, lastJobs=[], lastNodes=[], cutoffs={}, curThr=0.30, lastDetail=null;
+        // Bound on the UNFLAGGED tail only. The flagged set is fetched complete separately, so this
+        // number never decides whether an alert is visible -- only how much of the quiet remainder is
+        // shown alongside it. The job board runs to ~2,250 rows; fetching it whole would be ~644 KB on
+        // a 1.5 s poll, and nothing acts on the tail.
+        const JOB_TAIL_LIMIT = 250;
         let clockPaused=false;      // mirrors the SERVER's paused flag; refreshed by applyClock() on every poll
         let reportData=null, briefAt=0;
         const $ = id => document.getElementById(id);
@@ -1003,6 +1007,7 @@
             catch(e){ const ta=document.createElement('textarea'); ta.value=reportData.text; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(_){} ta.remove(); }
             const l=document.getElementById('report-copy-label'), o=l.textContent; l.textContent=t('report.copied'); setTimeout(()=>l.textContent=o,1500);
         }
+        // ================= report export =================
         function downloadReport(){
             if(!reportData) return;
             const stamp=(reportData.generated_iso||'').replace(/[^0-9]/g,'').slice(0,12);
@@ -1011,38 +1016,301 @@
             a.href=url; a.download='shift-report-'+stamp+'-'+lang+'.md'; document.body.appendChild(a); a.click(); a.remove();
             setTimeout(()=>URL.revokeObjectURL(url),1000);
         }
+
+        // ---- PDF ------------------------------------------------------------------------------
+        // CLIENT-SIDE, and that is a deployment requirement rather than a preference: production is a
+        // free-tier Render instance with a read-only filesystem, so a server-side renderer would have
+        // nowhere to write. The charts are already Chart.js canvases in the DOM, so
+        // canvas.toDataURL() hands us the exact image the operator is looking at -- no re-plotting,
+        // no second source of truth for the numbers.
+        //
+        // CHINESE. jsPDF's built-in fonts are Latin-1; CJK through them comes out as blank boxes,
+        // which is the failure this had to avoid. So a real CJK TrueType is embedded into the
+        // document's VFS. Noto Sans TC is the same family the dashboard already renders with, so the
+        // PDF matches the screen. It is fetched ONLY when the report actually contains CJK, because
+        // the source font is ~12 MB, but jsPDF SUBSETS it to the glyphs actually used -- measured, a
+        // 5-page Chinese report with 8 charts comes out at 462 KB -- and the download is
+        // browser-cached, so it is paid once per session rather than once per export.
+        const CJK_FONT_URL = 'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf';
+        // ANY character above Latin-1, not just CJK. Measured: the ENGLISH template report contains
+        // U+2192 and U+2264, and jsPDF's built-in Helvetica is WinAnsi -- those glyphs do not exist
+        // in it, and jsPDF silently switches the whole text run to 2-byte output, which both breaks
+        // the glyphs and makes the text unextractable. Testing only for CJK let the English PDF
+        // through in exactly that broken state. Noto Sans TC covers Latin, the arrows and the maths
+        // symbols, so this one rule makes both languages correct.
+        const needsEmbed = v => Array.from(String(v || '')).some(c => c.codePointAt(0) > 255);
+        let cjkFontB64 = null;
+
+        function u8ToB64(u8){
+            let s = '', C = 0x8000;              // chunked: String.fromCharCode blows the stack on ~12 MB
+            for(let i = 0; i < u8.length; i += C) s += String.fromCharCode.apply(null, u8.subarray(i, i + C));
+            return btoa(s);
+        }
+        async function ensureCjkFont(){
+            if(cjkFontB64) return cjkFontB64;
+            const r = await fetch(CJK_FONT_URL);
+            if(!r.ok) throw new Error('font fetch ' + r.status);
+            cjkFontB64 = u8ToB64(new Uint8Array(await r.arrayBuffer()));
+            return cjkFontB64;
+        }
+
+        function pdfBtnLabel(key){
+            const el = document.getElementById('report-pdf-label');
+            if(el) el.textContent = t(key);
+        }
+
+        async function downloadReportPdf(){
+            if(!reportData || !window.jspdf) return;
+            const btn = $('report-pdf-btn');
+            btn.disabled = true;
+            try{
+                const body = reportData.text || '';
+                const charts = (reportData.charts || []);
+                const needsCjk = needsEmbed(body)
+                    || charts.some(c => needsEmbed((c.caption||'') + labelText(c.title||{}) + labelText(c.subtitle||{})));
+
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF({unit:'pt', format:'a4', compress:true});
+                let FONT = 'helvetica', BOLD = 'bold';
+                if(needsCjk){
+                    pdfBtnLabel('report.pdf.font');
+                    const b64 = await ensureCjkFont();
+                    doc.addFileToVFS('NotoSansTC.ttf', b64);
+                    doc.addFont('NotoSansTC.ttf', 'NotoSansTC', 'normal');
+                    FONT = 'NotoSansTC'; BOLD = 'normal';   // one weight embedded; bold is synthesised by size
+                }
+                pdfBtnLabel('report.pdf.working');
+
+                const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+                const M = 40, CW = W - M*2;
+                let y = M;
+                const need = h => { if(y + h > H - M){ doc.addPage(); y = M; } };
+                const text = (str, size, colour, gap, bold) => {
+                    doc.setFont(FONT, bold ? BOLD : 'normal'); doc.setFontSize(size);
+                    doc.setTextColor(colour[0], colour[1], colour[2]);
+                    doc.splitTextToSize(String(str), CW).forEach(line => {
+                        need(size * 1.35); doc.text(line, M, y); y += size * 1.35;
+                    });
+                    y += (gap || 0);
+                };
+
+                // ---- header: the same three facts the modal shows, so a template-mode report is
+                // never mistaken on paper for an agent-written one
+                const modeKey = reportData.mode === 'llm' ? 'report.mode.llm'
+                              : reportData.mode === 'template' ? 'report.mode.template' : 'report.mode.rejected';
+                text(t('report.title'), 17, [15,23,42], 4, true);
+                text(t('report.generatedAt') + ': ' + (reportData.generated_iso || '—')
+                     + '   ·   ' + t('report.window') + ': ' + (reportData.window_h) + ' h'
+                     + '   ·   ' + t(modeKey), 9, [71,85,105], 6);
+                if(reportData.fallback_reason)
+                    text(t('report.why') + ': ' + reportData.fallback_reason, 8, [180,83,9], 4);
+                doc.setDrawColor(203,213,225); doc.line(M, y, W - M, y); y += 14;
+
+                // ---- narrative, with its markdown headings kept as headings
+                body.split('\n').forEach(raw => {
+                    const line = raw.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`/g, '').trimEnd();
+                    if(!line.trim()){ y += 5; return; }
+                    if(/^##\s+/.test(line))      { y += 6; text(line.replace(/^##\s+/, ''), 12, [8,145,178], 3, true); }
+                    else if(/^#\s+/.test(line))  { y += 6; text(line.replace(/^#\s+/, ''),  14, [15,23,42], 3, true); }
+                    else if(/^\s*[-*+]\s+/.test(line)) text('•  ' + line.replace(/^\s*[-*+]\s+/, ''), 9.5, [30,41,59], 1);
+                    else                          text(line, 9.5, [30,41,59], 2);
+                });
+
+                // ---- every rendered chart, as an image, in display order, with its own text
+                if(charts.length){
+                    y += 8; need(24);
+                    text(t('chart.section') || 'Charts', 12, [8,145,178], 4, true);
+                    charts.forEach((c, i) => {
+                        const cv = document.getElementById('rc-' + i);
+                        if(!cv) return;
+                        let img;
+                        try{ img = cv.toDataURL('image/png', 1.0); }catch(e){ return; }
+                        const ih = Math.min(230, CW * (cv.height / cv.width));
+                        need(ih + 58);
+                        text(labelText(c.title) + (c.title_suffix || ''), 10, [15,23,42], 1, true);
+                        if(c.subtitle) text(labelText(c.subtitle), 7.5, [100,116,139], 2);
+                        // white plate behind the image: the dashboard's chart text is light-on-dark
+                        doc.setFillColor(248,250,252); doc.rect(M, y, CW, ih, 'F');
+                        doc.addImage(img, 'PNG', M, y, CW, ih);
+                        y += ih + 6;
+                        if(c.caption) text(c.caption, 8.5, [51,65,85], 6);
+                    });
+                }
+
+                doc.save('shift-report-' + stamp() + '-' + lang + '.pdf');
+            }catch(e){
+                console.error(e);
+                jumpNote(t('report.pdf.fail'), true);
+            }finally{
+                pdfBtnLabel('report.pdf');
+                btn.disabled = false;
+            }
+            function stamp(){ return (reportData.generated_iso||'').replace(/[^0-9]/g,'').slice(0,12); }
+        }
         function renderLogs(d){
             const ic={CRITICAL:'fa-radiation',ERROR:'fa-bug',WARNING:'fa-exclamation-triangle',INFO:'fa-check-circle'};
             const co={CRITICAL:'text-rose-500',ERROR:'text-rose-400',WARNING:'text-amber-400',INFO:'text-cyan-400'};
-            $('log-container').innerHTML = d.logs.map(l=>`<div class="font-mono flex items-start gap-3 py-1 px-2 ${l.level==='CRITICAL'?'bg-rose-500/10 border-l-2 border-rose-500':''}"><span class="text-slate-500 shrink-0">[${l.time}]</span><span class="${co[l.level]||'text-slate-300'} shrink-0 w-20">[${l.level}]</span><span class="text-slate-400 shrink-0 w-28"><i class="fa-solid ${ic[l.level]||'fa-info-circle'} mr-1 text-[10px]"></i>${l.module}</span><span class="text-slate-200">${l.msg}</span></div>`).join('') || `<div class="text-slate-500 text-center py-8">${t('empty.logs')}</div>`;
+            $('log-container').innerHTML = d.logs.map(l=>{
+                const e = l.entity;
+                const jump = (e && e.kind && e.id != null)
+                  ? `<button onclick="jumpToEntity('${e.kind}',${e.id})" title="${escHtml(t('log.jump'))}" class="shrink-0 text-slate-500 hover:text-cyan-400 px-1"><i class="fa-solid fa-arrow-right-to-bracket text-[11px]"></i></button>`
+                  : '<span class="shrink-0 w-5"></span>';
+                return `<div class="font-mono flex items-start gap-3 py-1 px-2 ${l.level==='CRITICAL'?'bg-rose-500/10 border-l-2 border-rose-500':''}"><span class="text-slate-500 shrink-0">[${l.time}]</span><span class="${co[l.level]||'text-slate-300'} shrink-0 w-20">[${l.level}]</span><span class="text-slate-400 shrink-0 w-28"><i class="fa-solid ${ic[l.level]||'fa-info-circle'} mr-1 text-[10px]"></i>${l.module}</span><span class="text-slate-200 flex-1">${escHtml(l.msg)}</span>${jump}</div>`;
+            }).join('') || `<div class="text-slate-500 text-center py-8">${t('empty.logs')}</div>`;
         }
+        // ================= entity cards =================
+        // ORDERING, and why it is not a sort.
+        //
+        // The lists used to be re-sorted by risk on every 1.5 s poll, so as scores moved with the
+        // virtual clock every card changed position and an operator could not keep their eye on
+        // anything. The default arrangement is now TWO BUCKETS and nothing more:
+        //   top    -- entities the UI already renders as flagged
+        //   bottom -- everything else
+        // and WITHIN each bucket the order is the intrinsic id ascending, which does not move when a
+        // score does. Both buckets are ordered that way, including the top one: sorting the top
+        // bucket by risk would reintroduce exactly the shuffling this replaces, since a flagged
+        // entity's score changes on most polls. The only movement on screen is an entity crossing
+        // between buckets, which is the one movement worth noticing.
+        //
+        // The flagged test comes from the SERVER, not from a hardcoded percentage, so it follows the
+        // policy sliders: a node is flagged when `state !== 'HEALTHY'` (the server derives that from
+        // NODE_ALERT_S and the onset label, and it is what drives the badge), and a job when
+        // `flagged` is true (server: risk >= policies.alert_threshold AND active).
+        const nodeFlagged = n => n.state !== 'HEALTHY';
+        const jobFlagged  = j => !!j.flagged;
+
+        function bucketOrder(list, isFlagged, idKey){
+            const top = [], bottom = [];
+            list.forEach(x => (isFlagged(x) ? top : bottom).push(x));
+            const byId = (a, b) => a[idKey] - b[idKey];
+            return top.sort(byId).concat(bottom.sort(byId));
+        }
+
+        // The legacy sort options still do what they always did, but now over the FULL node set
+        // rather than a server-truncated slice -- see loadNodes().
+        function orderNodes(list, mode){
+            if(mode === 'temp')  return list.slice().sort((a,b)=>(b.temp??-1e9)-(a.temp??-1e9));
+            if(mode === 'power') return list.slice().sort((a,b)=>(b.power??-1e9)-(a.power??-1e9));
+            if(mode === 'node')  return list.slice().sort((a,b)=>a.node-b.node);
+            return bucketOrder(list, nodeFlagged, 'node');
+        }
+
+        const naCell = lbl => '<div class="flex justify-between"><span class="text-slate-500">'
+            + lbl + '</span><span class="na-tag">N/A</span></div>';
+
+        function nodeCard(n){
+            const badge = {
+                CRITICAL:'<span class="bg-rose-500/20 text-rose-400 px-2 py-0.5 rounded text-[10px] border border-rose-500/30 glow-text-rose whitespace-nowrap"><i class="fa-solid fa-radiation mr-1"></i>CRITICAL</span>',
+                WARNING :'<span class="bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded text-[10px] border border-amber-500/30 whitespace-nowrap"><i class="fa-solid fa-triangle-exclamation mr-1"></i>WARNING</span>',
+                HEALTHY :'<span class="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-[10px] border border-emerald-500/30 whitespace-nowrap"><i class="fa-solid fa-check-circle mr-1"></i>HEALTHY</span>'
+            }[n.state] || '';
+            const onset = n.onset
+                ? '<span class="bg-rose-500/15 text-rose-300 px-1.5 py-0.5 rounded text-[10px] border border-rose-500/30 whitespace-nowrap"><i class="fa-solid fa-bolt mr-1"></i>'
+                  + t('card.onset') + '</span>' : '';
+            const val = (v, unit) => v==null ? '<span class="na-tag">—</span>' : (v + unit);
+            const risk = n.scored
+                ? '<div class="flex items-center gap-2 mt-1">'
+                  + '<div class="flex-1 bg-slate-800 rounded-full h-1.5"><div class="'
+                  + (n.risk_pct>=50?'bg-rose-500':n.risk_pct>=15?'bg-amber-400':'bg-emerald-400')
+                  + ' h-1.5 rounded-full" style="width:' + Math.min(100, n.risk_pct) + '%"></div></div>'
+                  + '<span class="text-xs font-mono ' + (n.risk_pct>=50?'text-rose-400 font-bold':'text-slate-400')
+                  + '">' + n.risk_pct + '%</span></div>'
+                : '<div class="mt-1"><span class="na-tag text-[11px]">' + t('node.triaged') + '</span></div>';
+            const act = n.isolated
+                ? '<button onclick="event.stopPropagation()" class="text-[11px] border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/20 px-2 py-1 rounded whitespace-nowrap">' + t('card.undrain') + '</button>'
+                : '<button onclick="event.stopPropagation()" class="text-[11px] border border-slate-600 text-slate-400 hover:text-white px-2 py-1 rounded whitespace-nowrap">DRAIN</button>';
+            return '<div id="node-card-' + n.node + '" data-entity="node-' + n.node + '"'
+                + ' class="entity-card clickable glass-panel p-3 flex flex-col gap-2 border' + flashClass('node', n.node) + ' '
+                + (n.state==='CRITICAL' ? 'border-rose-500/40' : n.state==='WARNING' ? 'border-amber-500/30' : 'border-slate-700/50')
+                + '" onclick="openNodeDetail(' + n.node + ')">'
+                + '<div class="flex items-start justify-between gap-2 flex-wrap">'
+                +   '<div class="min-w-0"><div class="font-bold text-white text-sm truncate">' + escHtml(n.node_label) + '</div>'
+                +   '<div class="text-[10px] text-slate-500">rack ' + n.rack + '</div></div>'
+                +   '<div class="flex items-center gap-1 flex-wrap justify-end">' + badge + onset + '</div>'
+                + '</div>'
+                + '<div class="grid grid-cols-3 gap-2 text-[11px] font-mono">'
+                +   '<div><div class="text-slate-500 text-[9px] uppercase">' + t('card.temp') + '</div><div class="text-slate-200">' + val(n.temp,'°C') + '</div></div>'
+                +   '<div><div class="text-slate-500 text-[9px] uppercase">' + t('card.power') + '</div><div class="text-slate-200">' + val(n.power,'W') + '</div></div>'
+                +   '<div><div class="text-slate-500 text-[9px] uppercase">' + t('card.fan') + '</div><div class="text-slate-200">' + val(n.fan==null?null:Math.round(n.fan),'rpm') + '</div></div>'
+                + '</div>'
+                + '<div><div class="text-slate-500 text-[9px] uppercase">' + t('card.p2risk') + '</div>' + risk + '</div>'
+                // the three fields the dataset genuinely does not carry, kept visible as N/A rather
+                // than dropped -- their absence is part of what this dashboard is honest about
+                + '<div class="text-[10px] space-y-0.5 border-t border-slate-800/60 pt-1.5">'
+                +   naCell('VRAM') + naCell('PCIe') + naCell('MIG') + '</div>'
+                + '<div class="flex items-center justify-between gap-2 pt-1 mt-auto">'
+                +   '<button onclick="event.stopPropagation();openNodeDetail(' + n.node + ')" class="text-[11px] text-cyan-400 hover:text-cyan-300 whitespace-nowrap"><i class="fa-solid fa-magnifying-glass-chart mr-1"></i>' + t('card.details') + '</button>'
+                +   act
+                + '</div></div>';
+        }
+
         function renderNodesData(d){
-            $('node-summary').innerHTML = `${t('node.showing')} ${d.count} ${t('node.of')} ${d.nodes_total} · ${t('node.scoring')} <span class="text-cyan-400">${d.nodes_scored}</span> (${t('node.band')} ${d.nodes_in_scope_pct}%) · <span class="text-rose-400">${d.state_counts.CRITICAL}</span> ${t('node.anom')} / <span class="text-amber-400">${d.state_counts.WARNING}</span> ${t('node.warn')}`;
-            const badge={CRITICAL:'<span class="bg-rose-500/20 text-rose-400 px-2 py-1 rounded text-xs border border-rose-500/30 glow-text-rose"><i class="fa-solid fa-radiation mr-1"></i>CRITICAL</span>',WARNING:'<span class="bg-amber-500/20 text-amber-400 px-2 py-1 rounded text-xs border border-amber-500/30"><i class="fa-solid fa-triangle-exclamation mr-1"></i>WARNING</span>',HEALTHY:'<span class="bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded text-xs border border-emerald-500/30"><i class="fa-solid fa-check-circle mr-1"></i>HEALTHY</span>'};
-            $('node-table-body').innerHTML = d.nodes.map(n=>{
-                const temp=n.temp==null?'<span class="na-tag">—</span>':n.temp+'°C', pw=n.power==null?'—':n.power+'W', fan=n.fan==null?'—':Math.round(n.fan)+'rpm';
-                const risk=n.scored?`<div class="flex items-center gap-2"><div class="w-16 bg-slate-800 rounded-full h-1.5"><div class="${n.risk_pct>=50?'bg-rose-500':n.risk_pct>=15?'bg-amber-400':'bg-emerald-400'} h-1.5 rounded-full" style="width:${Math.min(100,n.risk_pct)}%"></div></div><span class="text-xs ${n.risk_pct>=50?'text-rose-400 font-bold':'text-slate-400'}">${n.risk_pct}%</span></div>`:`<span class="na-tag text-[11px]">${t('node.triaged')}</span>`;
-                return `<tr class="hover:bg-slate-800/30 clickable" onclick="openNodeDetail(${n.node})"><td class="px-6 py-3"><div class="font-bold text-white">${n.node_label}</div><div class="text-[10px] text-slate-500">rack ${n.rack}${n.onset?' · <span class="text-rose-400">onset</span>':''}</div></td><td class="px-6 py-3">${badge[n.state]}</td><td class="px-6 py-3 text-slate-300 text-xs">${temp} / ${pw} / ${fan}</td><td class="px-6 py-3 w-40">${risk}</td><td class="px-6 py-3">${naMark()}</td><td class="px-6 py-3">${naMark()}</td><td class="px-6 py-3">${naMark()}</td><td class="px-6 py-3 text-right">${n.isolated?`<button onclick="event.stopPropagation()" class="text-xs border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/20 px-3 py-1 rounded">解除隔離</button>`:`<button onclick="event.stopPropagation()" class="text-xs border border-slate-600 text-slate-400 hover:text-white px-3 py-1 rounded">DRAIN</button>`}</td></tr>`;
-            }).join('') || `<tr><td colspan="8" class="text-center text-slate-500 py-8">${t('empty.nodes')}</td></tr>`;
+            const total = d.nodes_total, shown = d.nodes.length;
+            const flagged = d.nodes.filter(nodeFlagged).length;
+            $('node-summary').innerHTML = t('node.showing') + ' ' + shown + ' ' + t('node.of') + ' ' + total
+                + ' · ' + t('node.scoring') + ' <span class="text-cyan-400">' + d.nodes_scored + '</span> ('
+                + t('node.band') + ' ' + d.nodes_in_scope_pct + '%) · <span class="text-rose-400">'
+                + d.state_counts.CRITICAL + '</span> ' + t('node.anom') + ' / <span class="text-amber-400">'
+                + d.state_counts.WARNING + '</span> ' + t('node.warn')
+                + (shown >= total ? ' · <span class="text-emerald-400/80">' + t('list.complete') + '</span>' : '');
+            const mode = $('node-sort').value || 'risk';
+            const list = orderNodes(d.nodes, mode);
+            $('node-grid').innerHTML = list.map(nodeCard).join('')
+                || '<div class="col-span-full text-center text-slate-500 py-8">' + t('empty.nodes') + '</div>';
+            flushPendingJump('node');
         }
+
+        function jobCard(j){
+            const sc = st => st==='RUNNING'?'text-emerald-400':st==='PENDING'?'text-amber-400':st==='COMPLETED'?'text-slate-400':'text-rose-500 glow-text-rose';
+            const si = st => st==='RUNNING'?'fa-play':st==='PENDING'?'fa-hourglass-half':st==='COMPLETED'?'fa-check':'fa-skull-crossbones';
+            let rb;
+            if(!j.active) rb = '<span class="text-[11px] text-slate-500">' + t('job.ended') + ' (' + escHtml(j.final_state) + ')</span>';
+            else if(j.flagged){
+                const cls = j.band==='high' ? 'text-rose-400 bg-rose-500/10 border-rose-500/30'
+                                            : 'text-amber-400 bg-amber-400/10 border-amber-500/30';
+                rb = '<span class="text-[11px] ' + cls + ' px-2 py-0.5 rounded border whitespace-nowrap"><i class="fa-solid fa-triangle-exclamation mr-1"></i>'
+                   + escHtml(j.pred_type) + ' · ' + j.risk_pct + '%</span>';
+            } else rb = '<span class="text-[11px] text-emerald-400/70"><i class="fa-solid fa-check mr-1"></i>' + t('risk.low') + ' · ' + j.risk_pct + '%</span>';
+            const mig = j.active && j.flagged;
+            return '<div id="job-card-' + j.job_id + '" data-entity="job-' + j.job_id + '"'
+                + ' class="entity-card clickable glass-panel p-3 flex flex-col gap-2 border' + flashClass('job', j.job_id) + ' '
+                + (mig ? (j.band==='high' ? 'border-rose-500/40' : 'border-amber-500/30') : 'border-slate-700/50')
+                + '" onclick="openJobDetail(' + j.job_id + ')">'
+                + '<div class="flex items-start justify-between gap-2 flex-wrap">'
+                +   '<div class="min-w-0"><div class="font-mono text-cyan-400 text-sm truncate">' + j.job_id + '</div>'
+                +   '<div class="text-[10px] text-slate-500 truncate"><i class="fa-regular fa-user mr-1"></i>' + escHtml(j.user)
+                +   ' · ' + escHtml(j.partition) + '/' + escHtml(j.qos) + '</div></div>'
+                +   '<span class="text-[10px] font-bold ' + sc(j.status) + ' whitespace-nowrap"><i class="fa-solid ' + si(j.status) + ' mr-1"></i>' + escHtml(j.status) + '</span>'
+                + '</div>'
+                + '<div><div class="flex items-center justify-between text-[10px] mb-1">'
+                +   '<span class="text-slate-400">' + j.progress + '%</span>'
+                +   '<span class="text-slate-500 font-mono">' + fmtMin(j.elapsed_min) + ' / ' + fmtMin(j.req_walltime_min) + '</span></div>'
+                +   '<div class="w-full bg-slate-800 rounded-full h-1"><div class="' + (j.flagged?'bg-rose-500':'bg-cyan-500')
+                +   ' h-1 rounded-full" style="width:' + j.progress + '%"></div></div></div>'
+                + '<div>' + rb + '</div>'
+                + '<div class="flex items-center justify-between gap-2 pt-1 mt-auto">'
+                +   '<button onclick="event.stopPropagation();openJobDetail(' + j.job_id + ')" class="text-[11px] text-cyan-400 hover:text-cyan-300 whitespace-nowrap"><i class="fa-solid fa-magnifying-glass-chart mr-1"></i>' + t('card.details') + '</button>'
+                +   (mig ? '<button onclick="event.stopPropagation()" class="bg-cyan-500 text-slate-900 text-[11px] font-bold px-2 py-1 rounded hover:bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"><i class="fa-solid fa-camera"></i></button>'
+                          : '<button onclick="event.stopPropagation()" class="text-slate-600 text-[11px] px-2 py-1"><i class="fa-solid fa-camera"></i></button>')
+                + '</div></div>';
+        }
+
         function renderJobs(){
-            const q=($('job-search').value||'').toLowerCase(); let jobs=lastJobs;
-            if(q) jobs=jobs.filter(j=>(''+j.job_id).includes(q)||j.user.toLowerCase().includes(q));
-            const sc=st=>st==='RUNNING'?'text-emerald-400':st==='PENDING'?'text-amber-400':st==='COMPLETED'?'text-slate-400':'text-rose-500 glow-text-rose';
-            const si=st=>st==='RUNNING'?'fa-play':st==='PENDING'?'fa-hourglass-half':st==='COMPLETED'?'fa-check':'fa-skull-crossbones';
-            $('job-table-body').innerHTML = jobs.map(j=>{
-                let rb;
-                if(!j.active) rb=`<span class="text-xs text-slate-500">${t('job.ended')} (${j.final_state})</span>`;
-                else if(j.flagged){ const cls=j.band==='high'?'text-rose-400 bg-rose-500/10 border-rose-500/30':'text-amber-400 bg-amber-400/10 border-amber-500/30'; rb=`<span class="text-xs ${cls} px-2 py-1 rounded border"><i class="fa-solid fa-triangle-exclamation"></i> ${j.pred_type} · ${j.risk_pct}%</span>`; }
-                else rb=`<span class="text-xs text-emerald-400/70"><i class="fa-solid fa-check"></i> ${t('risk.low')} · ${j.risk_pct}%</span>`;
-                const mig=j.active&&j.flagged;
-                return `<tr class="hover:bg-slate-800/30 clickable" onclick="openJobDetail(${j.job_id})"><td class="px-6 py-3 font-mono text-cyan-400">${j.job_id}</td><td class="px-6 py-3 text-slate-300"><i class="fa-regular fa-user mr-1 text-slate-500"></i>${j.user}<span class="text-[10px] text-slate-600 ml-1">${j.partition}/${j.qos}</span></td><td class="px-6 py-3 font-bold ${sc(j.status)} text-xs"><i class="fa-solid ${si(j.status)} mr-1"></i>${j.status}</td><td class="px-6 py-3"><div class="flex items-center justify-between text-xs mb-1"><span class="text-slate-400">${j.progress}%</span><span class="text-slate-500 font-mono">${fmtMin(j.elapsed_min)} / ${fmtMin(j.req_walltime_min)}</span></div><div class="w-full bg-slate-800 rounded-full h-1"><div class="${j.flagged?'bg-rose-500':'bg-cyan-500'} h-1 rounded-full" style="width:${j.progress}%"></div></div></td><td class="px-6 py-3">${rb}</td><td class="px-6 py-3 text-right">${mig?'<button onclick="event.stopPropagation()" class="bg-cyan-500 text-slate-900 text-xs font-bold px-3 py-1 rounded hover:bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"><i class="fa-solid fa-camera"></i></button>':'<button onclick="event.stopPropagation()" class="text-slate-600 text-xs px-2 py-1"><i class="fa-solid fa-camera"></i></button>'}</td></tr>`;
-            }).join('') || `<tr><td colspan="6" class="text-center text-slate-500 py-8">${t('empty.jobs')}</td></tr>`;
+            const q = ($('job-search').value||'').toLowerCase();
+            let jobs = lastJobs;
+            if(q) jobs = jobs.filter(j => (''+j.job_id).includes(q) || j.user.toLowerCase().includes(q));
+            jobs = bucketOrder(jobs, jobFlagged, 'job_id');
+            $('job-grid').innerHTML = jobs.map(jobCard).join('')
+                || '<div class="col-span-full text-center text-slate-500 py-8">' + t('empty.jobs') + '</div>';
+            flushPendingJump('job');
         }
 
         // ================= drill-down =================
-        async function openJobDetail(id){ try{ lastDetail=await api('/api/jobs/'+id); renderDetail(lastDetail); openPanel(); }catch(e){console.error(e);} }
-        async function openNodeDetail(id){ try{ lastDetail=await api('/api/nodes/'+id); renderDetail(lastDetail); openPanel(); }catch(e){console.error(e);} }
+        // These RETHROW. A click that fails should still be quiet in the console, but jumpToEntity()
+        // needs to know the entity could not be fetched so it can say so on screen instead of
+        // appearing to do nothing.
+        async function openJobDetail(id){ try{ lastDetail=await api('/api/jobs/'+id); renderDetail(lastDetail); openPanel(); }catch(e){console.error(e); throw e;} }
+        async function openNodeDetail(id){ try{ lastDetail=await api('/api/nodes/'+id); renderDetail(lastDetail); openPanel(); }catch(e){console.error(e); throw e;} }
         function openPanel(){ $('overlay').classList.remove('hidden'); $('panel').classList.add('open'); }
         function closePanel(){ $('overlay').classList.add('hidden'); $('panel').classList.remove('open'); lastDetail=null; }
         const lbl = x => lang==='en' ? x.label_en : x.label_zh;
@@ -1122,14 +1390,141 @@
         function closeHowItWorks(e){ if(e && e.target && e.target.closest && e.target.closest('#hiw > div') && e.type==='click' && e.target.id!=='hiw') { } $('hiw').classList.add('hidden'); }
 
         // ================= refresh =================
+        // ---- list loaders -------------------------------------------------------------------
+        // Split out of refresh() so a jump can load exactly the list it needs without also driving
+        // the clock read or the shift-report poll. The jump must not generate a report.
+        //
+        // NODES ARE FETCHED IN FULL (limit=1000 against 825 nodes). The server sorts, THEN truncates,
+        // so the old limit=120 meant the visible set depended on the sort: measured across 30
+        // timestamps, `sort=temp` hid a flagged node at every one of the 8 timestamps that had one,
+        // and at ts=1664293406 four of five flagged nodes were invisible. Fetching everything and
+        // ordering here removes that whole class of problem -- no sort can hide an alert. It costs
+        // ~230 KB instead of ~34 KB, paid only while the IPMI tab is open.
+        async function loadNodes(){
+            const d = await api('/api/nodes?limit=1000&sort=risk');
+            lastNodes = d.nodes;
+            renderNodesData(d);
+            return d;
+        }
+        // TWO FETCHES, and the split is the point.
+        //
+        //   top    -- the flagged set, COMPLETE, via ?flagged=1. A single risk-sorted fetch could not
+        //             hold it: measured, the last flagged job sits at rank 816 at the default 0.30
+        //             threshold and rank 1,821 at 0.05, so any fixed limit drops flagged jobs the
+        //             moment the operator lowers the slider -- silently, which is the failure mode
+        //             this project keeps designing out. The log-to-job jump also depends on being
+        //             able to reach any flagged job a log entry names.
+        //   bottom -- a BOUNDED slice of the remainder, fetched MOST-RECENTLY-SUBMITTED FIRST. That
+        //             choice is measured, not aesthetic: the log wall covers the last 3 hours, so the
+        //             jobs it names are recent ones. Across 30 timestamps and 1,030 job log entries,
+        //             the share that could not be found in the loaded list was 59.9% with an
+        //             id-ordered tail and 37.7% with a submit-ordered one -- and for the
+        //             "flagged at submission" entries specifically it fell from 25.4% to 0.2%.
+        //             The fetch order never reaches the screen; both buckets are re-ordered by id.
+        //
+        // Both are re-ordered by id for display, so neither fetch's own ordering reaches the screen.
+        async function loadJobs(){
+            const st = $('job-state').value;
+            const q  = st ? ('&state=' + st) : '';
+            const [top, rest] = await Promise.all([
+                api('/api/jobs?flagged=1&limit=2000&sort=job' + q),
+                api('/api/jobs?limit=' + JOB_TAIL_LIMIT + '&sort=submit' + q)
+            ]);
+            const seen = new Set(top.jobs.map(j => j.job_id));
+            const tail = rest.jobs.filter(j => !jobFlagged(j) && !seen.has(j.job_id));
+            lastJobs = top.jobs.concat(tail);
+
+            // The flagged figure IS the size of the top bucket -- the same array the cards come from,
+            // not a separately computed number -- and only the unflagged tail is truncated now.
+            $('job-summary').innerHTML =
+                '<span class="text-rose-400">' + top.count + '</span> ' + t('job.flaggedAll')
+                + ' · ' + tail.length + ' ' + t('job.tailShown')
+                + ' · ' + t('risk.threshold') + ' ' + curThr
+                + (rest.count >= JOB_TAIL_LIMIT
+                    ? ' · <span class="text-slate-500">' + t('job.tailTrunc') + '</span>' : '');
+            renderJobs();
+            return {jobs: lastJobs, count: lastJobs.length, flagged: top.count};
+        }
+
         async function refresh(){
             try{
                 applyClock(await api('/api/clock'));
                 if(currentTab==='dashboard'){ renderSummary(await api('/api/summary')); renderLogs(await api('/api/logs?limit=40')); }
-                else if(currentTab==='nodes'){ renderNodesData(await api('/api/nodes?limit=120&sort='+($('node-sort').value||'risk'))); }
-                else if(currentTab==='jobs'){ const st=$('job-state').value; const d=await api('/api/jobs?limit=250&sort=risk'+(st?('&state='+st):'')); lastJobs=d.jobs; $('job-summary').innerHTML=`${t('job.showing')} ${d.count} ${t('job.rows')} · ${t('risk.threshold')} ${curThr}`; renderJobs(); }
+                else if(currentTab==='nodes'){ await loadNodes(); }
+                else if(currentTab==='jobs'){ await loadJobs(); }
                 refreshBrief();     // AIOps Agent box (throttled to ~12s real, so polling never hammers the report)
             }catch(e){ console.error(e); }
+        }
+
+        // ================= jump to the entity a log entry names =================
+        // The id comes from the log row's STRUCTURED `entity` field ({kind, id}), not from parsing the
+        // rendered sentence. The message text is generated server-side and would have been parseable,
+        // but a regex over prose fails silently the first time someone rewords a line -- and a jump
+        // button that quietly stops working is worse than no button.
+        let pendingJump = null;     // {kind, id} waiting for its list to render
+        // The grid is rebuilt by innerHTML on every 1.5 s poll, which destroys the highlighted
+        // element and any class on it. So the highlight lives in STATE with an expiry, and the card
+        // renderers re-apply it -- otherwise the ring a jump just drew vanishes within a poll and
+        // the operator never sees where they landed.
+        let flashUntil = null;      // {kind, id, at}
+        const FLASH_MS = 2600;
+        const flashClass = (kind, id) =>
+            (flashUntil && flashUntil.kind === kind && flashUntil.id === id && Date.now() < flashUntil.at)
+                ? ' jump-hit' : '';
+
+        function flashCard(el, kind, id){
+            if(!el) return;
+            flashUntil = {kind, id, at: Date.now() + FLASH_MS};
+            el.scrollIntoView({block:'center', behavior:'smooth'});
+            el.classList.add('jump-hit');
+        }
+
+        function flushPendingJump(kind){
+            if(!pendingJump || pendingJump.kind !== kind) return;
+            const id = pendingJump.id;
+            const el = document.querySelector('[data-entity="' + kind + '-' + id + '"]');
+            if(el){ flashCard(el, kind, id); pendingJump = null; }
+        }
+
+        function jumpNote(msg, bad){
+            const el = $('jump-note');
+            el.className = 'fixed bottom-5 left-1/2 -translate-x-1/2 z-50 text-xs px-4 py-2 rounded-lg border shadow-lg '
+                + (bad ? 'bg-amber-500/15 border-amber-500/40 text-amber-200'
+                       : 'bg-cyan-500/15 border-cyan-500/40 text-cyan-200');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            clearTimeout(jumpNote._h);
+            jumpNote._h = setTimeout(()=>el.classList.add('hidden'), 5200);
+        }
+
+        async function jumpToEntity(kind, id){
+            const tab = kind === 'node' ? 'nodes' : 'jobs';
+            pendingJump = {kind, id};
+            // switchTab() calls refresh(); go through the loader directly instead so the jump never
+            // triggers a report generation, and never touches the clock beyond the read refresh does.
+            currentTab = tab;
+            document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active'));
+            $('tab-'+tab).classList.add('active'); $('nav-'+tab).classList.add('active');
+            try{
+                if(kind === 'node') await loadNodes(); else await loadJobs();
+            }catch(e){ console.error(e); }
+
+            const el = document.querySelector('[data-entity="' + kind + '-' + id + '"]');
+            if(el){ pendingJump = null; flashCard(el, kind, id); openEntityDetail(kind, id); return; }
+
+            // Not in the loaded list. The drill-down endpoint is per-id and independent of the list,
+            // so the entity is still reachable even when its card is not on screen.
+            pendingJump = null;
+            try{
+                await openEntityDetail(kind, id);
+                jumpNote(t('jump.notInList').replace('{id}', id), true);
+            }catch(e){
+                jumpNote(t('jump.unreachable').replace('{id}', id), true);
+            }
+        }
+        function openEntityDetail(kind, id){
+            return kind === 'node' ? openNodeDetail(id) : openJobDetail(id);
         }
 
         // ================= policies =================

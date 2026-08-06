@@ -49,6 +49,21 @@ def _seed_policies() -> dict:
 _DEFAULT_POLICIES = _seed_policies()      # the defaults the /reset endpoint restores
 policies = dict(_DEFAULT_POLICIES)        # the live, mutable, in-memory policy state
 
+# ---- prompt sizes, logged at startup ----
+# The narration endpoint fails on report-sized prompts and the prompt has grown by stealth before
+# (5,881 -> 9,090 characters). Printing both sizes on every boot means the number is visible in the
+# deploy log rather than something that has to be gone looking for; verify_prompts.py is what
+# actually enforces the ceiling.
+try:
+    _sizes = report.prompt_sizes(
+        report.assemble_facts(store, clock.now_ts(), _DEFAULT_POLICIES, 6))
+    print("[report.prompt] " + "  ".join(f"{k}={v}" for k, v in sorted(_sizes.items())), flush=True)
+    if _sizes["worst"] > _sizes["ceiling"]:
+        print(f"[report.prompt] WARNING: worst prompt {_sizes['worst']} chars exceeds the "
+              f"{_sizes['ceiling']} ceiling -- report-sized calls are likely to time out", flush=True)
+except Exception as _e:          # never let instrumentation stop the app booting
+    print(f"[report.prompt] size check skipped ({type(_e).__name__})", flush=True)
+
 app = FastAPI(title="AIOps Mission Control -- Marconi100 demo", version="1.0",
               description="Real failure-prediction models (P2 node-anomaly, P3 job-outcome) "
                           "replayed over the Sept-2022 test period through a virtual clock.")
@@ -67,9 +82,14 @@ def api_nodes(limit: int = Query(80, ge=1, le=1000), sort: str = "risk"):
 
 @app.get("/api/jobs")
 def api_jobs(limit: int = Query(200, ge=1, le=2000),
-            state: Optional[str] = None, sort: str = "risk"):
-    """Job table rows at the current virtual time (filter ?state=, sort by risk/elapsed/submit)."""
-    return store.jobs(clock.now_ts(), policies, limit=limit, state=state, sort=sort)
+            state: Optional[str] = None, sort: str = "risk", flagged: bool = False):
+    """Job table rows at the current virtual time (filter ?state=, sort by risk/elapsed/submit).
+
+    `flagged=1` returns ONLY jobs at or above the alert threshold, so a caller can load that set
+    complete instead of hoping a limit covers it -- the flagged set moves with the policy slider and
+    no fixed limit contains it."""
+    return store.jobs(clock.now_ts(), policies, limit=limit, state=state, sort=sort,
+                      flagged_only=flagged)
 
 @app.get("/api/logs")
 def api_logs(limit: int = Query(40, ge=1, le=200)):

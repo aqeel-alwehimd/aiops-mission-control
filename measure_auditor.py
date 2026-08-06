@@ -159,6 +159,60 @@ def build_fixtures(store):
               "No action needed.\n"),
         captions=[]))
 
+    # ---------- FALSE: Chinese containment, so that check has a zh measurement -----------------------
+    # The cohort check had no Chinese coverage at all. Writing these exposed a real defect: 之中 /
+    # 當中 are POSTPOSITIONS -- the container precedes them -- so classifying them like English
+    # "among" resolved every Chinese phrasing backwards. See _CUE_OUTER_FIRST.
+    F.append(dict(
+        id="zh1_containment_qizhong", ts=t1, kind="false", lang="zh",
+        target="其中包含 231 個已解決的失敗案例",
+        text=("## 摘要\n"
+              "本視窗共提交 2245 個任務，結束 2029 個。\n\n"
+              "## 風險評估\n"
+              "P3 於提交時標記了 331 個任務，其中包含 231 個已解決的失敗案例，捕捉率為 66.2%。\n\n"
+              "## 建議行動\n"
+              "交班前請複核觀察名單。\n"),
+        captions=[]))
+
+    F.append(dict(
+        id="zh2_containment_dangzhong", ts=t4, kind="false", lang="zh",
+        target="442 個被標記任務當中，30 個為漏判失敗",
+        text=("## 摘要\n"
+              "本視窗提交 1175 個任務，其中 442 個於提交時被標記。\n\n"
+              "## 風險評估\n"
+              "97 個標記任務確認失敗，148 個為誤判。\n\n"
+              "## 建議行動\n"
+              "請複核告警門檻。\n"),
+        captions=[("prediction_outcomes",
+                   "本圖涵蓋 442 個被標記任務當中，30 個為漏判失敗。")]))
+
+    # ---------- FALSE: over-generalisation across a list --------------------------------------------
+    # Both of these are real claims from generated reports. Every number is a fact, no containment is
+    # asserted, and the auditor is shown only 4 of the 6 jobs (PROMPT_LIST_CAP), so this class was
+    # invisible to every layer that existed.
+    F.append(dict(
+        id="overgen_all_same_risk", ts=t4, kind="false", lang="zh",
+        target="這6個高風險任務的風險評分均為98.6%",
+        text=("## 現況\n"
+              "本視窗提交 1175 個任務，442 個於提交時被標記。\n\n"
+              "## 當前風險\n"
+              "這6個高風險任務的風險評分均為98.6%，預測故障型態均為逾時。\n\n"
+              "## 建議行動\n"
+              "請聯繫該使用者。\n"),
+        captions=[]))
+
+    F.append(dict(
+        id="overgen_count_four_of_six", ts=t4, kind="false",
+        target="four of these carry a predicted risk of 98.6%",
+        text=("## Situation\n"
+              "1175 jobs were submitted in this window and 442 were flagged at submission.\n\n"
+              "## Current risks\n"
+              "Six in-flight jobs are on the watch list, and four of these carry a predicted risk "
+              "of 98.6%.\n\n"
+              "## Recommended actions\n"
+              "Contact the owning user before the next burst.\n"),
+        captions=[]))
+
     # ---------- CLEAN: correct narratives that must produce NOTHING --------------------------------
     # Several are deliberately near the line: they mention misses next to the flagged cohort, quote
     # both cohorts in one report, and use qualitative words that ARE supported. An auditor that has
@@ -224,6 +278,31 @@ def build_fixtures(store):
               "Re-read the catch rate at the end of the shift.\n"),
         captions=[("prediction_outcomes",
                    "Most of the flagged jobs in this window have not finished yet.")]))
+
+    # Chinese clean fixtures, so the widened zh cue lists are measured for false positives too, and
+    # deliberately including the phrasings most likely to trip them: a correct 其中 partition, and a
+    # correct contrast that names misses right after the flagged cohort.
+    F.append(dict(
+        id="clean_zh1_correct_partition", ts=t1, kind="clean", lang="zh", target=None,
+        text=("## 摘要\n"
+              "本視窗共提交 2245 個任務，結束 2029 個，其中 1669 個順利完成。\n\n"
+              "## 風險評估\n"
+              "提交時被標記的任務共 331 個，其中 153 個確認失敗、86 個為誤判、92 個尚未結束。"
+              "另有 78 個失敗從未被標記。\n\n"
+              "## 建議行動\n"
+              "交班前請複核觀察名單。\n"),
+        captions=[]))
+
+    F.append(dict(
+        id="clean_zh2_correct_two_cohorts", ts=t3, kind="clean", lang="zh", target=None,
+        text=("## 摘要\n"
+              "本視窗提交 1046 個任務，其中 332 個於提交時被標記。\n\n"
+              "## 風險評估\n"
+              "332 個標記任務當中，55 個確認失敗、41 個為誤判、236 個尚未結束。"
+              "另有 15 個失敗未被標記，捕捉率 78.6%。\n\n"
+              "## 建議行動\n"
+              "請於班次結束時重新檢視捕捉率。\n"),
+        captions=[]))
 
     F.append(dict(
         id="clean6_honest_bad_news", ts=t4, kind="clean", target=None,
@@ -300,13 +379,14 @@ def main():
     det = {}
     for fx in fixtures:
         facts = _f(fx["ts"], store)
-        adv = report.cohort_containment_review(
-            fx["text"], facts,
-            [(f"caption on '{cid}'", cap) for cid, cap in fx["captions"]])
+        extra = [(f"caption on '{cid}'", cap) for cid, cap in fx["captions"]]
+        adv = (report.cohort_containment_review(fx["text"], facts, extra)
+               + report.overgeneralisation_review(fx["text"], facts, extra))
         det[fx["id"]] = adv
         mark = ("CAUGHT" if adv else "missed") if fx["kind"] == "false" else \
                ("FALSE POSITIVE" if adv else "clean")
-        print(f"  {fx['kind']:<5} {fx['id']:<36} {len(adv)} finding(s)  {mark}")
+        codes = ",".join(sorted({a["code"] for a in adv})) or "-"
+        print(f"  {fx['kind']:<5} {fx['id']:<34} {len(adv)} finding(s) {codes:<38} {mark}")
         for a in adv:
             print(f"        {a['message'][:150]}")
     det_catch = sum(1 for fx in fixtures if fx["kind"] == "false" and det[fx["id"]])
@@ -314,6 +394,16 @@ def main():
     print()
     print(f"  deterministic: {det_catch}/{n_false} false fixtures caught, "
           f"{det_fp}/{n_clean} clean fixtures falsely flagged")
+    # per-check, since they answer different questions and ship independently
+    for name, fn in (("cohort_containment", report.cohort_containment_review),
+                     ("list_overgeneralisation", report.overgeneralisation_review)):
+        c = sum(1 for fx in fixtures if fx["kind"] == "false"
+                and fn(fx["text"], _f(fx["ts"], store),
+                       [(f"caption on '{cid}'", cap) for cid, cap in fx["captions"]]))
+        p = sum(1 for fx in fixtures if fx["kind"] == "clean"
+                and fn(fx["text"], _f(fx["ts"], store),
+                       [(f"caption on '{cid}'", cap) for cid, cap in fx["captions"]]))
+        print(f"    {name:<26} catches {c}/{n_false} false, flags {p}/{n_clean} clean")
 
     # ---------------- the same check against the TEMPLATE corpus ----------------------------------
     # The template is generated from these same facts and cannot state a false containment, so every
@@ -324,7 +414,7 @@ def main():
     print("FALSE-POSITIVE CORPUS: render_template() across the replay window, both languages")
     print("=" * 110)
     W0, W1 = int(store.meta["window_start_ts"]), int(store.meta["window_end_ts"])
-    corpus_hits, corpus_n = [], 0
+    corpus_hits, corpus_n = {"cohort_containment": [], "list_overgeneralisation": []}, 0
     for i in range(40):
         ts = int(W0 + (W1 - W0) * i / 39)
         facts = report.assemble_facts(store, ts, POL, WINDOW_H)
@@ -332,20 +422,24 @@ def main():
             for length in ("brief", "full"):
                 txt = report.render_template(facts, lang, length)
                 corpus_n += 1
-                hits = report.cohort_containment_review(txt, facts)
-                if hits:
-                    corpus_hits.append((ts, lang, length, hits[0]["message"][:160]))
-    print(f"  {corpus_n} correct-by-construction template reports scanned")
-    print(f"  false positives: {len(corpus_hits)}")
-    for h in corpus_hits[:8]:
-        print(f"    {h[0]} {h[1]}/{h[2]}: {h[3]}")
+                for hits in (report.cohort_containment_review(txt, facts),
+                             report.overgeneralisation_review(txt, facts)):
+                    for h in hits:
+                        corpus_hits[h["code"]].append((ts, lang, length, h["message"][:200]))
+    print(f"  {corpus_n} correct-by-construction template reports scanned "
+          f"({corpus_n // 2} English, {corpus_n // 2} Chinese)")
+    for code, hs in corpus_hits.items():
+        print(f"  {code:<26} false positives: {len(hs)}  "
+              f"({len(hs) / corpus_n:.1%})")
+        for h in hs[:6]:
+            print(f"      {h[0]} {h[1]}/{h[2]}: {h[3]}")
 
     result = {"threshold_catch": THRESHOLD_CATCH, "threshold_fp": THRESHOLD_FP,
               "runs": args.runs,
               "deterministic": {"catch": det_catch, "n_false": n_false,
                                 "fp": det_fp, "n_clean": n_clean,
                                 "template_corpus_n": corpus_n,
-                                "template_corpus_fp": len(corpus_hits)},
+                                "template_corpus_fp": {k: len(v) for k, v in corpus_hits.items()}},
               "llm": None}
 
     if args.det_only:
@@ -363,7 +457,8 @@ def main():
         facts = _f(fx["ts"], store)
         for r in range(args.runs):
             report.clear_cooldowns()          # one fixture's failure must not skip the next
-            a = report.audit_llm(facts, fx["text"], lang="en", captions=fx["captions"])
+            a = report.audit_llm(facts, fx["text"], lang=fx.get("lang", "en"),
+                                 captions=fx["captions"])
             lat.append(a["latency_s"])
             sev = scores(a.get("findings") or [])
             if fx["kind"] == "false":

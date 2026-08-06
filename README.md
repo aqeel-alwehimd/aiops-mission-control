@@ -505,6 +505,43 @@ the semicolon, "separately" and "never" all drop it.
 "most of the flagged jobs have already been caught" — carries nothing to resolve. That class belongs
 to the auditor.
 
+**Chinese.** 之中 / 當中 / 之內 are **postpositions**: the container comes *before* them
+("442 個任務當中，127 個…"), the opposite of English "among". They had been classified like the
+English word, so every Chinese phrasing using them resolved backwards and could never match a
+declared non-containment — the check had no working Chinese coverage at all. They are now outer-first
+cues; 屬於 / 隸屬 / 納入 / 計入 are the genuine inner-first ones. The separator list was widened to
+match the English side too (此外, 至於, 反之, 並非, 不屬於, 排除, …), since a thin separator list costs
+*false positives* on correct contrastive sentences. Measured with two Chinese false fixtures and two
+Chinese clean ones: **2/2 caught, 0/2 falsely flagged**, and 0 false positives across the 80 Chinese
+template reports.
+
+#### And a second deterministic check: over-generalisation across a list
+
+`overgeneralisation_review()` (advisory code `list_overgeneralisation`) closes the gap that survived
+everything else. Two claims in real generated reports — *"這6個高風險任務的風險評分均為98.6%"* when one
+scored 98.0, and *"four of these carry a predicted risk of 98.6%"* when five do — attach a quantifier
+or a count to a value that only **some** members of a list carry. Every number is a real fact, no
+containment is asserted, and the auditor cannot see it either, because `trim_facts_for_prompt` caps
+list sections at 4: it is shown four of the six jobs, so "all six" genuinely *is* unsupported from
+its view and "four" looks right.
+
+The full facts hold the list, so it is countable. `OVERGEN_LISTS` registers which lists and fields
+are checkable; a universal quantifier (all / every / each / both / 均 / 皆 / 全數) asserts every member,
+a count asserts exactly that many, and the check counts how many actually carry the value.
+
+Two guards decide whether it is usable at all, and the first version had neither:
+
+* **the value must resolve unambiguously** — numbers *and strings* outside the tracked lists
+  disqualify it. `TIMEOUT` is a `pred_type` on the watch list but also a SLURM state on the outcome
+  examples, so it does not resolve. This costs real recall (the third live instance, "four
+  TIMEOUT-predicted jobs", is not caught) and it is what makes the check shippable.
+* **digits are not counts.** A template writes digits in every sentence ("131 jobs submitted, 42
+  flagged, 0 TIMEOUT"), so treating each as a claim about list membership was catastrophic. Only
+  spelled-out quantities count — which is precisely what the narrator prompt tells the agent to use
+  for quantities not in the facts, and what both live failures used.
+
+Measured effect of those two guards on the same corpus: **8,971 false positives → 0**.
+
 Both agents now go through **one** resilient path, `invoke_agent()` — retry with jittered backoff,
 error-class-aware handling, and a circuit breaker — with a per-agent profile (the narrator gets 3
 attempts / 150 s; the advisory auditor gets 2 / 75 s). **Cooldown is namespaced per agent**
@@ -609,14 +646,20 @@ python prewarm_reports.py --demo     # the four sweep-selected moments, EN + ZH,
                                      # is an LLM report that passes the relational content check
 ```
 
-> **Status: `data/report_cache.json` is currently EMPTY, and that is not a code problem.** The
-> LaplaceAI endpoint degraded partway through this work and has not recovered: **~34 consecutive
-> narration attempts all failed** with `HTTP 504 ×2` then a read timeout, across two runs and about
-> 85 minutes of endpoint time. The failure is payload-dependent rather than a total outage — a
-> 104-byte probe to the *same* endpoints answers HTTP 200 in 28–43 s, while the ~4 KB report prompt
-> times out every time, which matches the documented 504 cause ("the agent exceeded their internal
-> limit"). `verify_demo_path.py --mock` proves the serving path works and will serve the moment
-> `--demo` can complete; nothing about the demo path needs changing when the endpoint returns.
+> **Status (2026-08-04): `data/report_cache.json` is EMPTY, and that is not a code problem.** The
+> LaplaceAI narration endpoint degraded partway through this work and did not recover within the
+> session: **~42 consecutive narration attempts failed**, every one `HTTP 504` (twice, then a read
+> timeout under the normal retry profile). That is two full `--demo` runs plus eight single-attempt
+> polls with the real 9,090-character demo prompt, spread over roughly three hours.
+>
+> The failure is **payload-dependent, not a total outage**: a 104-byte probe to the *same* endpoints
+> answers HTTP 200 in 28–43 s throughout, while the real report prompt times out every time. That
+> matches the documented 504 cause — "the agent exceeded their internal limit" — and points at
+> capacity on their side rather than anything here.
+>
+> Nothing about the demo path needs changing when it returns. `verify_demo_path.py --mock` proves the
+> serving path end to end (68 assertions, median 6.0 ms, zero outbound calls); running
+> `python prewarm_reports.py --demo` and committing the two files is the whole remaining step.
 
 `--demo` differs from a plain prewarm in two ways that matter. It **retries until the agent
 succeeds**, because a template loses the AI-generated badge and with it the point of the
@@ -719,3 +762,126 @@ and push. No model retraining is involved — the predictions are precomputed an
 - No model inference runs in a request handler — the API only reads the SQLite store, so the demo feels instant.
 - The virtual clock's default position is stateless (wall-clock-derived); manual controls are per-process. Run one worker on the free tier.
 - Windows: if the port is stuck from a previous `--reload` run, start with `--port 8010`.
+
+---
+
+## Handover
+
+Everything below is measured, not estimated. Dates are the day the number was produced.
+
+### Filling the report cache
+
+The demo path serves pre-generated reports from `data/report_cache.json`, a **committed artefact**.
+Render's filesystem is ephemeral (free plan spins down after 15 min idle; a redeploy replaces the
+container), so a cache written at runtime does not survive and a prewarm run on a laptop never
+reaches production. Generating locally and committing the file is what makes the demo path real.
+
+```bash
+python prewarm_reports.py --demo
+```
+
+That walks the four sweep-selected moments x two languages at `length=full`, **retries until the
+agent succeeds** (a template loses the AI-generated badge, which is the point of the integration),
+and **discards any candidate that fails the content gate**. Then commit `data/report_cache.json` and
+`data/demo_moments.json` together — the second tells the UI which moments to offer, and shipping one
+without the other either hides working reports or advertises moments that have none.
+
+Verify before demoing:
+
+```bash
+python verify_demo_path.py
+```
+
+`--mock` builds a throwaway cache at a scratch path so the machinery is testable when the endpoint is
+down; it never touches the committed file.
+
+**The content gate blocks on**: a false containment or over-generalisation proved in Python; the
+wrong language; a raw JSON leak (an invalid reply displayed verbatim); meta-commentary; and any
+high/medium auditor finding. It does **not** replace reading the narrative — every cached report
+should be checked by hand against `facts` before it is committed.
+
+### The `goto` clock action, and why it exists
+
+`cache_key()` buckets the virtual time to `CACHE_BUCKET` (900 virtual seconds). `VirtualClock._base_vt`
+is stateless — `win_start + ((now - BASE_EPOCH) * 3600) % span` — over a 72-virtual-hour window. So at
+the default 3600x:
+
+* the live clock **crosses the whole replay window every 72 real seconds**;
+* each 15-minute cache bucket is the current one for **0.25 real seconds**.
+
+A prepared report is therefore reachable about once every 72 seconds, for a quarter of a second.
+`jump` does not fix it: `_ensure_manual()` seeds the override with `paused: False`, so a jump starts a
+manual clock that immediately runs at 3600x and leaves the bucket in that same quarter second, and
+pausing separately is a second HTTP call with the clock running in between.
+
+```bash
+curl -X POST localhost:8000/api/clock -H "content-type: application/json" -d "{\"action\":\"goto\",\"value\":1664303261}"
+```
+
+`goto` sets the time **and pauses, inside one acquisition of the lock**, so the landing is exact.
+Nothing else changed: `play`, `pause`, `step`, `speed`, `jump`, `jump_frac` keep their behaviour, and
+`reset` still drops the override and returns to the shared wall-clock position — so a demo pin cannot
+outlive a restart. The UI's demo-moment selector calls it; the list comes from
+`GET /api/demo_moments`, and the control hides itself when nothing is prepared.
+
+### Advisory codes
+
+All advisories are **non-blocking**. They never change `mode`, never reject a report, and never feed
+back into whether the LLM path was used. `fallback_reason` is the only thing that explains a template.
+
+| Code | Raised by | Means |
+|---|---|---|
+| `language_mismatch` | `advisory_review` | the report is largely not in the requested language |
+| `meta_commentary` | `advisory_review` | opens with commentary about the assistant or a file rather than report content |
+| `short_content` | `advisory_review` | shorter than the floor for this length (backstop only; a brief report is legitimately short) |
+| `off_vocabulary_section` | `section_advisories` | the agent invented a heading outside the closed set; the prose was kept, the heading dropped |
+| `unknown_chart_id` | `select_charts` | an id outside the `ChartId` enum was requested and dropped, one advisory each |
+| `caption_chart_mismatch` | `caption_consistency_review` | a caption cites a number its own chart does not plot — real elsewhere, wrong under this picture |
+| `cohort_containment` | `cohort_containment_review` | a sentence places one cohort's quantity inside another's when the cohort model says they do not nest |
+| `list_overgeneralisation` | `overgeneralisation_review` | a quantifier or spelled-out count attached to a value that only some list members carry |
+| `auditor_flag` | `audit_advisories` | the auditor ran and objected; **one advisory per finding**, carrying the quoted span, severity and contradicted fact |
+| `auditor_no_credentials` | `audit_advisories` | the auditor is not configured, so the report was not reviewed |
+| `auditor_cooldown` | `audit_advisories` | the auditor is in its own cooldown after an earlier failure |
+| `auditor_timeout` | `audit_advisories` | the auditor timed out |
+| `auditor_failed` | `audit_advisories` | the auditor call failed (5xx, connection) |
+| `auditor_unparseable` | `audit_advisories` | it answered 200 with something that is neither the findings shape nor the older verdict shape; its answer was discarded |
+| `auditor_skipped_budget` | `audit_advisories` | skipped to stay inside `REPORT_TIME_BUDGET` rather than extending a request the user is waiting on |
+
+The last six exist so a **dead auditor is never mistaken for an approving one** — the failure mode
+this whole layer was rebuilt to remove.
+
+### Measured performance of every verification layer
+
+| Layer | What it catches | Measured | Date |
+|---|---|---|---|
+| Numeric hard gate (`check_claims`) | any number not traceable to a fact value | 24/24 guardrail cases; grouped-number and schema-identifier edge cases pinned | 2026-08-04 |
+| `caption_chart_mismatch` | a caption citing a figure its chart does not plot | fired 3x on real scope errors in live testing; the only layer catching anything before this pass | 2026-08-03 |
+| `cohort_containment` | a false containment between two real facts | **6/11 false fixtures** (incl. 2/2 Chinese); **0 false positives on 160 template reports** (80 EN + 80 ZH) and 0/8 clean fixtures | 2026-08-04 |
+| `list_overgeneralisation` | a quantifier or spelled-out count the list does not support | **2/3 in-class fixtures** (2/11 overall); **0 false positives on 160 template reports** and 0/8 clean fixtures | 2026-08-04 |
+| Data Auditor (LLM) | relational claims: containment, denominator, causation, qualitative contradiction, omission | **catch 100.0 % (21/21)**, **false positives 83.3 % (15/18)**; 39/39 calls answered HTTP 200, median 38.7 s | 2026-08-04 |
+| `sweep_report.py` | every report invariant across the whole replay period | 1688 assertions, 40 points, 0 failures | 2026-08-04 |
+| `verify_demo_path.py --mock` | clock pin, cache key match, no outbound call | 68 assertions, 0 failures; served latency **median 6.0 ms** | 2026-08-04 |
+
+**Read the auditor's two numbers together.** Detection is complete — it caught every false fixture in
+every run, including the two the numeric gate structurally cannot see (a caption with no numbers at
+all, and a quantity written as a word). The noise is high and has a single cause: **all 16
+high/medium findings on correct narratives were the MATERIAL OMISSION class** ("five node onsets are
+in the facts and the narrative does not mention them"); **zero** were containment, denominator,
+causation or qualitative contradiction. The prompt has not been tuned to improve that number. The
+83 % is an **upper bound** measured against deliberately terse fixtures; real generated reports are
+fuller and 2 of 4 Chinese ones drew no findings at all.
+
+### Known gaps, stated rather than implied
+
+* A false containment expressed **without numbers** ("most of the flagged jobs have already been
+  caught") cannot be caught deterministically — nothing resolves.
+* Scope set by a **leading subordinate clause** ("Looking specifically at the 442 flagged jobs, 127 of
+  the failures...") is discourse-level, not an adjacent-pair relation, and `cohort_containment_review`
+  does not see it. The auditor does.
+* A quantifier over a **categorical** value ("four TIMEOUT-predicted jobs") is dropped because the
+  token is ambiguous — `TIMEOUT` is also a SLURM state on the outcome examples. That ambiguity guard
+  is what took `list_overgeneralisation` from 8,971 false positives to zero; the recall cost is real
+  and deliberate.
+* The auditor sees `trim_facts_for_prompt`, which caps list sections at 4. It therefore cannot judge
+  claims about all 6 watch-list jobs, and will occasionally call a true statement unsupported for
+  that reason. The trimming is correct for its own purpose; this is its cost.

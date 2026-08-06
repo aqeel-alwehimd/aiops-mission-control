@@ -135,8 +135,16 @@ check("correct_warnings is the ONLY key belonging to two sets (it IS the overlap
       == ["prediction_outcomes.correct_warnings.count"],
       str([k for k, v in report.SET_OF_KEY.items() if len(v) > 1]))
 prose = report.cohort_prose(f)
+# cohort_prose() names keys by their last segment now -- the full dotted paths cost ~500 characters
+# of an auditor prompt that has a measured size ceiling, and the section is already given by the
+# heading. The CONTENT is unchanged, which is what this asserts.
+def _short(pth):
+    return pth.rsplit(".", 1)[0].split(".")[-1] if pth.endswith(".count") else pth.split(".")[-1]
 check("cohort_prose() states every non-containment the model declares",
-      all(inner in prose and outer in prose for inner, outer, _ in report.COHORT_NON_CONTAINMENT))
+      all(f"{_short(i)} is NOT part of {_short(o)}" in prose
+          for i, o, _ in report.COHORT_NON_CONTAINMENT), prose[-400:])
+check("cohort_prose() states every identity the model declares",
+      all(f"= {_short(w)}=" in prose for _p, w in report.COHORT_IDENTITIES))
 check("cohort_prose() carries THIS report's live values, not a static template",
       str(report._fact_at(f, "prediction_outcomes.flagged_total")) in prose)
 print()
